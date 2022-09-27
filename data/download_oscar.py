@@ -1,18 +1,16 @@
 '''
 Helper script for scrapping the cc100 dataset from https://data.statmt.org/cc-100/
 
-Dumps out the data into a directory called 'cc100'. Expects that a directory under 
+Dumps out the data into a directory called 'oscar'. Expects that a directory under 
 this name does not exist.
 '''
 
 import requests 
 import os
-import random
 
 from requests.auth import HTTPBasicAuth
 from multiprocessing.dummy import Pool 
 from bs4 import BeautifulSoup
-
 
 # global variables 
 WEBSITE_URL = 'https://oscar-prive.huma-num.fr/2109/packaged/'
@@ -95,7 +93,7 @@ def main():
 
     print(f"\n\nLaunching thread pool with {NUM_THREADS} threads!")
     thread_pool = Pool(NUM_THREADS)
-    result = thread_pool.map(download_file, list(zip(download_links, download_destinations)))
+    thread_pool.map(download_file, list(zip(download_links, download_destinations)))
 
 if __name__ == '__main__':
     main()
