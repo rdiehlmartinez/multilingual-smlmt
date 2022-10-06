@@ -18,7 +18,7 @@ args = parser.parse_args()
 
 # ENTRY POINT 
 def main():
-
+    
     # Setting up an id for the specific run
     if args.run_id is None: 
         run_id = str(random.randint(1, 1e9))

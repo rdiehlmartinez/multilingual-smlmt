@@ -20,73 +20,57 @@ from ..utils import move_to_device
 logger = logging.getLogger(__name__)
 
 class MAML(MetaBaseLearner):
-    def __init__(self, base_model,  optimizer_type='adam',
-                                    meta_lr=1e-2,
-                                    inner_lr=1e-2,
-                                    classifier_lr=1e-1,
-                                    num_learning_steps=5,
-                                    use_first_order=False,
-                                    *args,
-                                    **kwargs):
+    def __init__(
+        self,
+        base_model,
+        **kwargs,
+    ) -> None:
         """
-        MAML implements a type of BaseLearner.
+        MAML implements a type of MetaBaseLearner.
 
         Reads in a base model and sets up all of the metalearning parameters. The core idea of 
         MAML is to train a model using a two-loop approach - an outerloop that learns the learning 
         process, and an inner loop in which the model is trained on a given meta-learning task.
 
         Args: 
-            * base_model (implementation of BaseModel)
-            * optimizer_type (str) : The type of optimizer (e.g. 'adam') 
-            * meta_lr (float): Learning rate for the outer loop meta learning step
-            * The following keyword args define inner-loop hyper-parameters that can be 
-                meta-learned. The values passed in represent the initial values:
-                * inner_lr (float): inner-loop learning rate of the base_model 
-                * classifier_lr (float): inner-loop learning rate of the classifier head
-            * num_learning_steps (int): Number of gradients steps in the inner loop used 
-                to learn the meta-learning task
-            * use_first_order (bool): Whether a first order approximation of higher-order gradients
-                should be used (defaults to False)
+            * base_model (implementation of BaseModel): The model to be meta-learned 
+                (implementation of BaseModel)
         """
 
-        super().__init__(base_model, inner_lr, classifier_lr, *args, **kwargs)
+        super().__init__(base_model, **kwargs)
 
         # Initializing params of the functional model that will be meta-learned
         self.model_params = torch.nn.ParameterList()
         for param in base_model.parameters():
-            self.model_params.append(torch.nn.Parameter(data=param.data.to(self.base_device),
-                                                        requires_grad=param.requires_grad)
-                                )
+            self.model_params.append(
+                torch.nn.Parameter(
+                    data=param.data.to(self.base_device),
+                    requires_grad=param.requires_grad
+                )
+            )
 
-        # NOTE: the learning rates for the inner-loop adaptation are defined in MetaBaseLearner
-
-        # loading in meta optimizer 
-        self.meta_lr = float(meta_lr)
-        if optimizer_type == 'adam': 
-            self.optimizer = torch.optim.Adam(params=self.meta_params_iter(), lr=self.meta_lr)
-        else:
-            logger.exception(f"Invalid optimizer type: {optimizer_type}")
-            raise Exception(f"Invalid optimizer type: {optimizer_type}")
-
-        # number of steps to perform in the inner loop
-        self.num_learning_steps = int(num_learning_steps)
-        
-        # set flag to indicate if first-order approximation should be used (à la Reptile)
-        if isinstance(use_first_order, str):
-            use_first_order = eval(use_first_order)
-        self.use_first_order = use_first_order
+        self.setup_optimizer()
 
     ###### Helper functions ######
 
     def meta_params_iter(self):
         """ Returns an iterator over all of the meta parameters"""
-        return itertools.chain(self.model_params, self.inner_layers_lr, [self.classifier_lr], 
-                               self.retained_lm_head.values() if self.retain_lm_head else [])
+        return itertools.chain(
+            self.model_params,
+            self.inner_layers_lr,
+            [self.classifier_lr], 
+            self.retained_lm_head.values() if self.retain_lm_head else [],
+        )
 
-    def get_task_init_kwargs(self, task_init_method, n_labels, **kwargs):
+    def get_task_init_kwargs(
+        self,
+        task_init_method: str,
+        n_labels: int, 
+        **kwargs
+    ):
         """ 
         Override base implementation of this method to replace the model with the functional 
-        model and also pass in the model params when the task head is initialized using  protomaml.
+        model and also pass in the model params when the task head is initialized using protomaml.
 
         Args:
             * task_init_method (str): Method for initializing the task head
@@ -102,12 +86,18 @@ class MAML(MetaBaseLearner):
 
         return init_kwargs
     
-
     ###### Model training methods ######
 
     ### Multi Processing Helper Method
-    def run_inner_loop_mp(self, rank, world_size, data_queue, loss_queue, step_optimizer, 
-                          num_tasks_per_iteration):
+    def run_inner_loop_mp(
+        self,
+        rank: int,
+        world_size: int,
+        data_queue,
+        loss_queue,
+        step_optimizer, 
+        num_tasks_per_iteration: int,
+    ):
         """
         Entry point for running inner loop using multiple processes. Sets up DDP init process
         group, wraps learner in DDP and calls forward/backward on the DDP-wrapped model.
@@ -159,21 +149,29 @@ class MAML(MetaBaseLearner):
             loss_queue.put([task_loss.detach().item()])
 
     ### Main Inner Training Loop 
-    def run_inner_loop(self, support_batch, query_batch, device=None, *args, **kwargs): 
+    def run_inner_loop(
+        self,
+        support_batch_list,
+        query_batch,
+        device=None, 
+        **kwargs
+    ): 
         """
         Implements the inner loop of the MAML process - clones the parameters of the model 
-        and trains those params using the support_batch for self.num_learning_steps number 
+        and trains those params using the support_batch_list for self.num_learning_steps number 
         of steps using SGD.
         
         Args: 
-            * support_batch: A dictionary containing the following information for the support set
+            * support_batch_list: A list of task batches, each batch of task data is represented
+                as a dictionary containing the following information:
                 * input_ids (torch.tensor): Input tensors of shape (N*K, max_seq_len)
                 * input_target_idx (torch.tensor): Tensor indicating for each sample at what index
                     we apply the final classification layer 
                 * label_ids (torch.tensor): Tensor of labels corresponding to masked out subword id
                 * attention_mask (torch.tensor): Tensor indicating which tokens in input_ids are
                     not pad tokens
-            * query_batch: Same as support_batch, but for the data of the query set 
+            * query_batch: Same as the dictionary structure of the support_batch, but for the data
+                of the query set 
             * device: Optional string to specify a device to override base_device
 
         Returns: 
@@ -190,49 +188,80 @@ class MAML(MetaBaseLearner):
         self.functional_model.train()
 
         # Moving data to appropriate device
-        support_batch = move_to_device(support_batch, device)
+        support_batch_list = [move_to_device(support_batch, device) for support_batch in \
+                                support_batch_list]
         query_batch = move_to_device(query_batch, device)
        
-        # Setting up LM head for task training
+        num_inner_steps = self.num_learning_steps
+
+        # Setting up LM head for task training (either using existing one or setting up new one)
         if self.retain_lm_head:
             lm_head = self.retained_lm_head
         else:
-            init_kwargs = self.get_task_init_kwargs(self.lm_head_init_method, self.lm_head_n,
-                                                    data_batch=support_batch, device=device)
-            lm_head = TaskHead.initialize_task_head(task_type='classification',
-                                                    method=self.lm_head_init_method,
-                                                    init_kwargs=init_kwargs)
+            init_kwargs = self.get_task_init_kwargs(
+                self.lm_head_init_method,
+                self.lm_head_n,
+                data_batch=support_batch_list[0] if 'protomaml' in self.lm_head_init_method else None, 
+                device=device
+            )
+
+            lm_head = TaskHead.initialize_task_head(
+                task_type='classification',
+                method=self.lm_head_init_method,
+                init_kwargs=init_kwargs
+            )
             
+            if 'protomaml' in self.lm_head_init_method and self.use_multiple_samples:
+                # If we're using protomaml, the first batch is used for sampling the task head 
+                support_batch_list = support_batch_list[1:]
+                num_inner_steps = self.num_learning_steps - 1 
+
         # NOTE: anytime we update the lm head we need to clone the params
         adapted_lm_head = {key: torch.clone(param) for key, param in lm_head.items()}
 
         # adapting params to the support set -> adapted params are phi
-        phi = self._adapt_params(support_batch, 
-                                 params=self.model_params, 
-                                 lm_head_weights=adapted_lm_head,
-                                 learning_rate=self.inner_layers_lr,
-                                 num_inner_steps=self.num_learning_steps,
-                                 clone_params=True,
-                                 optimize_classifier=True)
+        phi = self._adapt_params(
+            data_batch_list=support_batch_list, 
+            params=self.model_params, 
+            lm_head_weights=adapted_lm_head,
+            learning_rate=self.inner_layers_lr,
+            num_inner_steps=num_inner_steps,
+            clone_params=True,
+            optimize_classifier=True
+        )
 
         # evaluating on the query batch using the adapted params phi  
         self.functional_model.eval()
 
-        outputs = self.functional_model.forward(input_ids=query_batch['input_ids'],
-                                                attention_mask=query_batch['attention_mask'],
-                                                params=phi)
+        outputs = self.functional_model.forward(
+            input_ids=query_batch['input_ids'],
+            attention_mask=query_batch['attention_mask'],
+            params=phi
+        )
 
         self.functional_model.train()
 
-        _, loss = self._compute_task_loss(outputs, query_batch, adapted_lm_head, 
-                                          task_type='classification')
+        _, loss = self._compute_task_loss(
+            outputs,
+            query_batch,
+            adapted_lm_head, 
+            task_type='classification'
+        )
+
         return loss
 
 
     ###### Model evaluation methods ######
 
-    def run_finetuning(self, task_type, finetune_dataloader, n_labels, task_head_init_method,
-                       max_finetuning_batch_steps=-1, **kwargs): 
+    def run_finetuning(
+        self,
+        task_type,
+        finetune_dataloader,
+        n_labels,
+        task_head_init_method,
+        max_finetuning_batch_steps=-1,
+        **kwargs
+    ): 
         """
         Creates a copy of the trained model parameters and continues to finetune these 
         parameters on a given dataset. 
@@ -261,11 +290,16 @@ class MAML(MetaBaseLearner):
 
         ### Initializing the task head used for the downstream NLU task
         task_init_data_batch = move_to_device(next(iter(finetune_dataloader)), self.base_device)
-        init_kwargs = self.get_task_init_kwargs(task_head_init_method, n_labels,
-                                                data_batch=task_init_data_batch)
-        task_head_weights = TaskHead.initialize_task_head(task_type=task_type,
-                                                          method=task_head_init_method,
-                                                          init_kwargs=init_kwargs)
+        init_kwargs = self.get_task_init_kwargs(
+            task_head_init_method,
+            n_labels,
+            data_batch=task_init_data_batch
+        )
+        task_head_weights = TaskHead.initialize_task_head(
+            task_type=task_type,
+            method=task_head_init_method,
+            init_kwargs=init_kwargs
+        )
 
         # detaching parameters from original computation graph to create new leaf variables
         finetuned_model_params = []

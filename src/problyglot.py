@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 class Problyglot(object):
     """
-    Orchestrates model loading, training and evaluation using a specific 
-    type of (meta-)learner.
+    Orchestrates model loading, training and evaluation using a specific type of (meta-)learner.
     """
 
     def __init__(self, config, resume_num_task_batches=0):
@@ -42,16 +41,22 @@ class Problyglot(object):
         if 'META_DATASET' in config:
             self.meta_dataset = MetaDataset(config)
 
-            self.return_standard_labels = config.getboolean("META_DATASET",
-                                                            "return_standard_labels",
-                                                            fallback=False)
-            self.meta_dataloader = MetaDataLoader(self.meta_dataset, return_standard_labels=\
-                                                                     self.return_standard_labels)
+            self.return_standard_labels = config.getboolean(
+                "META_DATASET",
+                "return_standard_labels",
+                fallback=False
+            )
+            self.meta_dataloader = MetaDataLoader(
+                self.meta_dataset,
+                return_standard_labels=self.return_standard_labels
+            )
 
         # Setting device 
         self.base_device = config.get("PROBLYGLOT", "device", fallback=DEFAULT_DEVICE)
         self.use_multiple_gpus = self.base_device == torch.device("cuda") and num_gpus > 1
         logger.info(f"Running problyglot on device: {self.base_device}")
+        if self.base_device == torch.device("cuda"):
+            logger.info(f"Number of GPUs available: {num_gpus}")
 
         # setting base model 
         self.base_model_name = config.get("BASE_MODEL", "name")
@@ -75,7 +80,7 @@ class Problyglot(object):
             self.evaluator = Evaluator(config)
 
 
-    def load_model(self, base_model_name):
+    def load_model(self, base_model_name: str):
         """
         Helper function for reading in base model, should be intialized with the 
         from_kwargs() class method 
@@ -125,9 +130,12 @@ class Problyglot(object):
             logger.exception(f"Invalid learner method: {learner_method}")
             raise Exception(f"Invalid learner method: {learner_method}")
 
-        learner = learner_cls(self.base_model, base_device=self.base_device,
-                                               seed=self.config.getint("EXPERIMENT", "seed"),
-                                               **learner_kwargs)
+        learner = learner_cls(
+            self.base_model,
+            base_device=self.base_device,
+            seed=self.config.getint("EXPERIMENT", "seed"),
+            **learner_kwargs
+        )
 
         # NOTE: possibly load in learner checkpoint
         # if num_task_batches is 0 at the start of training, then we are resuming training 
@@ -316,13 +324,13 @@ class Problyglot(object):
                 data_queue.put([batch], False)
             else:
                 ## Basic training with just a single GPU 
-                task_name, support_batch, query_batch = batch
+                task_name, support_batch_list, query_batch = batch
 
                 if self.learner_method == "platipus":
-                    task_loss, (ce_loss, kl_loss) = self.learner.run_inner_loop(support_batch,
+                    task_loss, (ce_loss, kl_loss) = self.learner.run_inner_loop(support_batch_list,
                                                                                 query_batch)
                 else: 
-                    task_loss = self.learner.run_inner_loop(support_batch, query_batch)
+                    task_loss = self.learner.run_inner_loop(support_batch_list, query_batch)
             
                 task_loss = task_loss/num_tasks_per_iteration # normalizing loss 
                 if self.learner_method == "platipus":

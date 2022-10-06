@@ -50,12 +50,17 @@ class MetaDataset(IterableDataset):
         languages = self._get_languages(config)
         self.datasets, self.datasets_md = self._initialize_datasets(config, languages)
 
-        self.task_sampling_method = config.get("META_DATASET", "task_sampling_method",
-                                               fallback="random")
+        self.task_sampling_method = config.get(
+            "META_DATASET",
+            "task_sampling_method",
+            fallback="random"
+        )
         if self.task_sampling_method == 'proportional':
-            self.task_sampling_prop_rate = config.getfloat("META_DATASET",
-                                                           "task_sampling_prop_rate",
-                                                           fallback=0.5)
+            self.task_sampling_prop_rate = config.getfloat(
+                "META_DATASET",
+                "task_sampling_prop_rate",
+                fallback=0.5
+            )
         
         super().__init__()
 
@@ -86,7 +91,6 @@ class MetaDataset(IterableDataset):
                 language to the associated dataset for that language 
             * datasets_md {lng: dict()}: Returns a dictionary mapping a specific language to 
                 metadata associated with the dataset for that language
-
         """
 
         def compute_dataset_size(lng_root_fp): 
@@ -110,8 +114,16 @@ class MetaDataset(IterableDataset):
             dataset_size = compute_dataset_size(lng_root_fp)
 
             language_task_kwargs = dict(config.items('LANGUAGE_TASK'))
-            dataset = IterableLanguageTaskDataset(lng_root_fp, language, seed=seed,
-                                                  **language_task_kwargs)
+            if config.getboolean("LEARNER", "use_multiple_samples", fallback=True):
+                language_task_kwargs['num_task_samples'] = \
+                    config.getint("LEARNER", "num_learning_steps")
+
+            dataset = IterableLanguageTaskDataset(
+                lng_root_fp,
+                language,
+                seed=seed,
+                **language_task_kwargs
+            )
             
             datasets[language] = dataset
             datasets_md[language] = {"dataset_size": dataset_size} # Can add more metadata 
@@ -165,24 +177,33 @@ class IterableLanguageTaskDataset(object):
     Iterable dataset that reads language data from a provided directory of txt files 
     and returns at each iteration some N-way K-shot example
     '''
-    def __init__(self, root_fp, lng,
-                                seed=-1,
-                                n=10,
-                                k=5,
-                                q=10,
-                                buffer_size=1e6,
-                                sample_size=10_000,
-                                mask_sampling_method="proportional",
-                                mask_sampling_prop_rate=0.3,
-                                max_seq_len=128,
-                                **kwargs): 
+    def __init__(
+        self,
+        root_fp: str,
+        lng: str,
+        seed: int = -1,
+        n: int = 10,
+        k: int = 5,
+        q: int = 10,
+        num_task_samples: int = 1,
+        buffer_size: int = 1e6,
+        sample_size: int = 10_000,
+        mask_sampling_method: str  = "proportional",
+        mask_sampling_prop_rate: float = 0.3,
+        max_seq_len: int = 128,
+        **kwargs
+    ) -> None: 
         """ 
         Initializes params and data buffers for the iterable dataset. 
 
         For each iteration reads in (sample_size) sentences from the dataset, and from those 
-        sentences samples a N-way K-shot 'task'. This process happens on a worker node, which 
-        then communicates with the parent node by writting out the N-way K-shot data to a 
-        data buffer that is stored in shared memory. 
+        sentences generates num_task_samples of N-way K-shot 'task' samples. This is implemented by
+        first generating a single N-way (num_task_samples * K)-way task and then dividing that 
+        up into num_task_samples number of samples of N-way K-shot tasks.
+        Also generates a final single sample of a N-way Q-shot task that is used as the query set.
+
+        This process happens on a worker node, which then communicates with the parent node by
+        writting out the N-way K-shot data to a data buffer that is stored in shared memory. 
 
         Note then that when the parent calls the get_stream() method, we only need to 
         read from the data buffer which can happen quickly.
@@ -193,27 +214,29 @@ class IterableLanguageTaskDataset(object):
                 expected to be .txt.gz files, where each line is a new sample.
             * lng (str): iso code for the language corresponding to the dataset
             * seed (int): seed to use for reproducibility; a negative value will skip seed setting
-            * [optional] n (int): The N in N-way K-shot classification (defaults to 10)
-            * [optional] k (int): The K in N-way K-shot classification (defaults to 5)
+            * [optional] n (int): The N in N-way K-shot classification
+            * [optional] k (int): The K in N-way K-shot classification
             * [optional] q (int: The number of samples in the query set for each 'task'
                 (defaults to 10) Thus for each class, we must find K+Q examples of that class.
-            * [optional] buffer_size (int): size of the memory-mapped buffer
-                (defaults to 100,000 bytes)
-            * [optional] sample_size (int): number of phrases to sample before returning a sample 
-                for N-way k-shot classification (defaults to 10,000)
-            * [optional] mask_sampling_method (str): either one of 'random' or 'proportional' which
+            * [optional] num_task_samples (int): The number of samples of N-way K-shot tasks to 
+                return
+            * [optional] buffer_size (int): Size of the memory-mapped buffer
+            * [optional] sample_size (int): Number of phrases to sample before returning a sample 
+                for N-way k-shot classification 
+            * [optional] mask_sampling_method (str): Either one of 'random' or 'proportional' which
                 specify how to sample the N tasks
-            * [optional] mask_sampling_prop_rate (float): used if mask_sampling_method is
-                'proportional',  specifies the sampling proportional rate so that
+            * [optional] mask_sampling_prop_rate (float): Used if mask_sampling_method is
+                'proportional', specifies the sampling proportional rate so that
                 x~U(x)^{mask_sampling_prop_rate}
-            * [optional] max_seq_len (int): max length of input sequence 
+            * [optional] max_seq_len (int): Max length of input sequence 
         """
         super().__init__()
         self.root_fp = root_fp 
         self._lng = lng
         self.N = int(n)
-        self.K = int(k)
+        self.K = int(k) * int(num_task_samples)
         self.Q = int(q)
+        self.num_task_samples = int(num_task_samples)
 
         buffer_size = int(buffer_size)
 
@@ -256,15 +279,37 @@ class IterableLanguageTaskDataset(object):
         self.worker.terminate()
         self.worker.join()
 
+    def split_task_samples(self, support_samples): 
+        """
+        Splits up support_samples into a list of length num_task_samples that each contain a 
+        sample of an N-way K-shot task. Is only called if self.num_task_samples > 1.
+
+        Args: 
+            * support_samples {token_id : [K*num_task_samples samples of token_id masked out]}: 
+                Mapping of N different token_ids to K samples of sentences where the token is masked out.
+        Returns: 
+            * task_samples ([support_samples]): A list of support_samples
+        """
+        task_samples = [defaultdict(list) for _ in range(self.num_task_samples)]
+        for label, samples in support_samples.items():
+            for task_sample_idx, task_sample in enumerate(task_samples):
+                # samples is a list of length k*num_task_samples
+                start_index = task_sample_idx * int(self.K/self.num_task_samples)
+                end_index = (task_sample_idx+1) * int(self.K/self.num_task_samples)
+                task_sample[label].extend(samples[start_index:end_index])
+        return task_samples
+
     def __next__(self): 
         """ 
         NOTE: Called from main process
         Reads and returns the data that has been stored in the support_data_buffer and the 
-        query_data_buffer by the worker node.
+        query_data_buffer by the worker node. Note that if self.num_task_samples is > 1 that 
+        K will have been multiplied by this value. In this instance support_samples will be a 
+        list of N-way K-shot samples.
 
         Returns: 
-            * support_samples {token_id : [K samples of token_id masked out]}: Mapping of 
-                N different token_ids to K samples of sentences where the token is masked out.
+            * support_samples_list [{token_id : [K samples of token_id masked out]}]: list of length
+                self.num_task_samples of N-way K-shot support samples (i.e. tasks). 
             * query_samples {token_id : [Q samples of token_id masked out]}: Mapping of 
                 N different token_ids to Q samples of sentences where the token is masked out.
         """
@@ -308,7 +353,9 @@ class IterableLanguageTaskDataset(object):
         self.lock.release()
         self.event.set()
 
-        return (support_samples, query_samples)
+        support_samples_list = self.split_task_samples(support_samples)
+
+        return (support_samples_list, query_samples)
 
     def __iter__(self):
         """ To comply with iterator protocol """

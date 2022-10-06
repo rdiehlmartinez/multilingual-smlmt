@@ -8,7 +8,7 @@ from .metadataset import MASK_TOKEN_ID
 
 class MetaCollator(object):
 
-    def __init__(self, return_standard_labels):
+    def __init__(self, return_standard_labels: bool):
         """ 
         Helper class to define a collate function. In order to supply additional arguments to 
         the function, we wrap the function in this class and pass in params via instance attributes.
@@ -27,24 +27,25 @@ class MetaCollator(object):
         into a model. 
         
         Args: 
-            * batch: tuple containing the following: 
-                * task_name (str): task name (e.g. the language) of the current batch of data 
-                * (support_set, query_set), where this tuple contains the following: 
-                    * support_set {token id: [K samples where token id occurs]}: mapping of N token
-                        ids to K samples per token id occurs
-                    * query_set {token id: [Q samples where token id occurs]}: mapping of N token
+            * batch: Tuple containing the following: 
+                * task_name (str): Task name (e.g. the language) of the current batch of data 
+                * (support_set_list, query_set), where this tuple contains the following: 
+                    * support_set_list [{token id: [K samples where token id occurs]}]: List of 
+                        a mapping of N token ids to K samples per token id occurs
+                    * query_set {token id: [Q samples where token id occurs]}: Mapping of N token
                         ids to Q samples per token id occurs
 
         Returns: 
-            * task_name (str): task name (i.e. the language) of batch
-            * support_batch: a dictionary containing the following information for the support set
+            * task_name (str): Task name (i.e. the language) of batch
+            * support_batch_list: A list of dictionaries, each containing the following information
+                for the support set:
                 * input_ids (torch.tensor): Input tensors of shape (N*K, max_seq_len)
                 * input_target_idx (torch.tensor): Tensor indicating for each sample at what index 
                     we apply the final classification layer 
                 * label_ids (torch.tensor): Tensor of labels corresponding to masked out subword id
                 * attention_mask (torch.tensor): Tensor indicating which tokens in input_ids
                     are not pad tokens
-            * query_batch: same as support_batch, but for the data of the query set 
+            * query_batch: Same as support_batch, but for the data of the query set 
 
         """
         
@@ -63,7 +64,8 @@ class MetaCollator(object):
             batch_max_seq_len = 0 
 
             for idx, (masked_tok_id, subword_samples) in enumerate(batch_samples.items()):
-                # randomly assigns each subword_idx to a number in range(N)
+                # randomly assigns each subword_idx to a number in range(N) if not using 
+                # return_standard_labels; otherwise use the actual token id that is masked
                 # recall batch_samples is a dict({tok id: [samples]})
                 for subword_sample in subword_samples:
 
@@ -96,11 +98,11 @@ class MetaCollator(object):
             }
 
             return processed_batch
-        
-        support_batch = process_batch(support_samples)
+
+        support_batch_list = [process_batch(support_sample) for support_sample in support_samples]    
         query_batch = process_batch(query_samples)
 
-        return (task_name, support_batch, query_batch)
+        return (task_name, support_batch_list, query_batch)
     
 
 class MetaDataLoader(DataLoader):

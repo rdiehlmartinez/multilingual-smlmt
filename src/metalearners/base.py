@@ -9,6 +9,7 @@ import os
 import re 
 
 from collections import OrderedDict
+from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -22,11 +23,19 @@ logger = logging.getLogger(__name__)
 
 class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
-    def __init__(self, base_model, base_device, seed, lm_head_init_method='protomaml',
-                 lm_head_n=100, retain_lm_head=False, **kwargs):
+    def __init__(
+        self,
+        base_model,
+        base_device: str,
+        seed: int,
+        lm_head_init_method: str = 'protomaml',
+        lm_head_n: Union[int, str] = 100,
+        retain_lm_head: Union[bool, str] = False,
+        use_multiple_samples: Union[bool, str] = True,
+        **kwargs
+    ) -> None:
         """
-        BaseLearner establishes the inferface for the learner class and 
-        inherents from torch.nn.Module. 
+        BaseLearner establishes the inferface for the learner class.
         
         Args: 
             * base_model (implements a BaseModel)
@@ -37,8 +46,10 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 modeling tasks used for training.
             * retain_lm_head (bool): Indicate whether we should maintain a single task head 
                 that is learned over the course of meta training, or whether for each task we 
-                should initialie a new task head.
-
+                should initialize a new task head.
+            * use_multiple_samples: We can specify whether each learning step that the BaseLearner
+                takes relies on only a single sample of an N-way K-shot task, or whether the 
+                learner can have access to multiple sample of an N-way K-shot task. 
         """
         super().__init__()
         self.seed = seed
@@ -63,9 +74,11 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             assert("protomaml" not in self.lm_head_init_method),\
                 "retain_task_head cannot be used with protomaml lm head initialization"
             init_kwargs = self.get_task_init_kwargs(lm_head_init_method, self.lm_head_n)
-            self.retained_lm_head = TaskHead.initialize_task_head(task_type='classification',
-                                                                  method=lm_head_init_method,
-                                                                  init_kwargs=init_kwargs)
+            self.retained_lm_head = TaskHead.initialize_task_head(
+                task_type='classification',
+                method=lm_head_init_method,
+                init_kwargs=init_kwargs,
+            )
 
         else: 
             # If we are re-initializing the LM head for each training task, then we should use 
@@ -74,11 +87,24 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 logger.warning("LM head will be reinitialized without protomaml (NOT RECOMMENDED)")
 
         logger.info(f"LM head retaining set to: {self.retain_lm_head}")
+            
+        # set flag to indicate whether we want to use the same or different N-way K-shot tasks 
+        # during each training loop
+        if isinstance(use_multiple_samples, str):
+            self.use_multiple_samples = eval(use_multiple_samples)
+        else: 
+            self.use_multiple_samples = use_multiple_samples
 
     ###### Task head initialization methods ######
 
-    def get_task_init_kwargs(self, task_init_method, n_labels, data_batch=None, device=None,
-                             **kwargs):
+    def get_task_init_kwargs(
+        self,
+        task_init_method,
+        n_labels,
+        data_batch=None,
+        device=None,
+        **kwargs
+    ):
         """ 
         Helper method for generating keyword arguments that can be passed into a task head 
         initialization method
@@ -273,18 +299,45 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
 class MetaBaseLearner(BaseLearner):
 
-    def __init__(self, base_model, inner_lr, classifier_lr, *args, **kwargs):
+    def __init__(
+        self,
+        base_model,
+        optimizer_type: str = 'adam',
+        meta_lr: Union[float, str] = 1e-2,
+        inner_lr: Union[float, str] = 1e-2,
+        classifier_lr: Union[float, str] = 1e-1,
+        num_learning_steps: Union[int, int] = 5,
+        use_first_order: Union[bool, str] = False,
+        **kwargs
+    ) -> None:
         """ 
         Inherents from BaseLearner and establishes the base class for all meta-learners 
         (e.g. maml and platipus). Provides useful functionality for meta-learners which
         rely on the torch higher library to maintain a functionalized version of the model 
         with corresponding parameters that are clones and fed into the functionalized model.
 
-        One important NOTE - the base_model we are meta learning needs to contain parameter names 
+        NOTE! The base_model we are meta learning needs to contain parameter names 
         that specify what layer the parameter is in (e.g. 'attention.layer.1'). This is because 
         we store per-layer parameter weights.
+
+        Args:
+            * base_model: The model to be meta-learned (implementation of BaseModel)
+            * optimizer_type: The type of optimizer (e.g. 'adam') 
+            * meta_lr: Learning rate for the outer loop meta learning step
+            * inner_lr: Initial inner-loop learning rate of the base_model - this value is 
+                learned over the course of meta-learning 
+            * classifier_lr: Initial inner-loop learning rate of the classifier head - this value
+                is learned over the course of meta-learning 
+            * num_learning_steps: Number of gradients steps in the inner loop used to learn the
+                meta-learning task
+            * use_first_order: Whether a first order approximation of higher-order gradients
+                should be used                
         """
-        super().__init__(base_model, *args, **kwargs)
+        super().__init__(base_model, **kwargs)
+
+        # Setting up meta optimization parameters
+        self.optimizer_type = optimizer_type
+        self.meta_lr = float(meta_lr)
 
         # Deducing the num of layers and mapping each parameter to the layer that parameter is in
         self.param_idx_to_layer = {}
@@ -296,8 +349,10 @@ class MetaBaseLearner(BaseLearner):
                 self.param_idx_to_layer[idx] = int(layer[0][6:])
             else: 
                 self.param_idx_to_layer[idx] = None
-        layers = set(self.param_idx_to_layer.values())            
+        
+        layers = set(self.param_idx_to_layer.values())       
 
+        # NOTE: Each layer gets its own learning rate 
         # We store a list of learning rates for each layer of the model that are meta-learned 
         # and we initialize each of these to inner_lr
         self.inner_layers_lr = torch.nn.ParameterList([
@@ -307,19 +362,37 @@ class MetaBaseLearner(BaseLearner):
                                         for layer in layers if layer is not None
                                     ])
 
+        # NOTE: The final classification layer also gets its own learning rate 
         self.classifier_lr = torch.nn.Parameter(torch.tensor(float(classifier_lr)).\
                                                     to(self.base_device))
-
+        
         if len(self.inner_layers_lr) == 0:
-            # Something is probably wrong - we are not storing any learning rates for any of the 
-            # layers. Might be desired behavior by the user but probably a bug.
+            # NOTE: we are not storing any learning rates for any of the layers.
             logger.error(
             """
             Could not specify per-layer learning rates. Ensure that the model parameters that are 
             in the same layer contain the string 'layer.[number]' as part of their name.
-            """)
+            """
+            )
+
+        # number of steps to perform in the inner loop
+        self.num_learning_steps = int(num_learning_steps)
+        
+        # set flag to indicate if first-order approximation should be used (à la Reptile)
+        if isinstance(use_first_order, str):
+            self.use_first_order = eval(use_first_order)
+        else: 
+            self.use_first_order = use_first_order
 
     ### Base setup functionality for meta learning models
+
+    def setup_optimizer(self):
+        """ Helper function for setting up the (meta) optimizer """
+        if self.optimizer_type == 'adam': 
+            self.optimizer = torch.optim.Adam(params=self.meta_params_iter(), lr=self.meta_lr)
+        else:
+            logger.exception(f"Invalid optimizer type: {optimizer_type}")
+            raise Exception(f"Invalid optimizer type: {optimizer_type}")
 
     def functionalize_model(self):
         """ Helper function for converting base_model into a functionalized form"""
@@ -356,9 +429,17 @@ class MetaBaseLearner(BaseLearner):
         return updated_state_dict
 
     ### Helper function for adapting the functionalized parameters based on some data_batch
-    def _adapt_params(self, data_batch, params, lm_head_weights, learning_rate, num_inner_steps,
-                            optimize_classifier=False, clone_params=True, evaluation_mode=False,
-                     ):
+    def _adapt_params(
+        self,
+        data_batch_list,
+        params,
+        lm_head_weights,
+        learning_rate,
+        num_inner_steps,
+        optimize_classifier=False,
+        clone_params=True,
+        evaluation_mode=False,
+    ):
         """ 
         Adapted from: 
         https://github.com/cnguyen10/few_shot_meta_learning
@@ -373,8 +454,8 @@ class MetaBaseLearner(BaseLearner):
         The parameters are then updated using SGD with a given learning rate, and returned. 
 
         Params:
-            * data_batch (dict): Batch of data for a forward pass through the model 
-                (see run_inner_loop for information on the data structure)
+            * data_batch_list (dict): Batches of data that are used for training the model in the  
+                inner loop (see run_inner_loop for information on the data structure)
             * params (iterable): Iterable of torch.nn.Paramater()s
                 (the params that we want to evaluate our model at)
             * lm_head_weights (dict): Weights of the lm classification head
@@ -401,13 +482,24 @@ class MetaBaseLearner(BaseLearner):
 
         for num_step in range(num_inner_steps):
             
-            # Running forward pass through functioanl model and computing classificaiton loss
-            outputs = self.functional_model.forward(input_ids=data_batch['input_ids'],
-                                                    attention_mask=data_batch['attention_mask'],
-                                                    params=adapted_params)
+            if self.use_multiple_samples: 
+                data_batch = data_batch_list[num_step]
+            else:
+                data_batch = data_batch_list[0]
+            
+            # Running forward pass through functional model and computing classificaiton loss
+            outputs = self.functional_model.forward(
+                input_ids=data_batch['input_ids'],
+                attention_mask=data_batch['attention_mask'],
+                params=adapted_params
+            )
 
-            _, loss = self._compute_task_loss(outputs, data_batch, lm_head_weights,
-                                              task_type='classification')
+            _, loss = self._compute_task_loss(
+                outputs,
+                data_batch,
+                lm_head_weights,
+                task_type='classification'
+            )
 
             # Computing resulting gradients of the inner loop
             grad_params = [p for p in adapted_params if p.requires_grad]

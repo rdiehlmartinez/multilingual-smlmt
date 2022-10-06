@@ -138,8 +138,9 @@ def classification_protomaml(base_model_hidden_dim, n_labels, model, data_batch,
                         attention_mask=data_batch['attention_mask'])
 
     # outputs has form (batch_size, sequence_length, hidden_size);
+    # NOTE: the CLS token at idx position 0 is used as the input representation
     batch_size = outputs.size(0)
-    last_hidden_state = outputs[torch.arange(batch_size), data_batch['input_target_idx']]
+    last_hidden_state = outputs[torch.arange(batch_size), 0]
 
     prototypes = torch.zeros((n_labels, base_model_hidden_dim), device=device)
 
@@ -156,43 +157,6 @@ def classification_protomaml(base_model_hidden_dim, n_labels, model, data_batch,
     task_head_weights = nn.ParameterDict({
         "classifier_weight": nn.Parameter(classifier_weight),
         "classifier_bias": nn.Parameter(classifier_bias)
-    })
-
-    return task_head_weights
-
-
-@TaskHead.register_initialization_method
-def classification_protomaml_fc(base_model_hidden_dim, n_labels, **kwargs):
-    """
-    Same as protomaml, expect also adds a fully connected layer (FC) of dimension 
-    base_model_hidden_dim. This FC connected layer is initialized randomly. 
-
-    Args: 
-        * base_model_hidden_dim (int): The hidden dimensions of the outputs of the base_model 
-        * n_labels (int): Number of labels (classes) to classify over 
-
-        * kwargs must contain the required arguments for calling classification_random and 
-            classification_protomaml
-    Returns: 
-        * task_head_weights (nn.ParameterDict): {
-            * fc_weight -> (nn.Parameter): weight matrix of fully connected layer
-            * fc_bias -> (nn.Parameter): bias vector of fully connected layer 
-            * classifier_weight -> (nn.Parameter): classification weight matrix
-            * classifier_bias -> (nn.Parameter): classification bias vector
-            }
-    """
-
-    # Little bit of a hack - can initialize weights of FC layer by
-    # repurposing classification_random
-    fc_head_weights = classification_random(base_model_hidden_dim, base_model_hidden_dim, **kwargs)
-
-    protomaml_weights = classification_protomaml(base_model_hidden_dim, n_labels, **kwargs)
-
-    task_head_weights = nn.ParameterDict({
-        "fc_weight": fc_head_weights["classifier_weight"],
-        "fc_bias": fc_head_weights["classifier_bias"],
-        "classifier_weight": protomaml_weights["classifier_weight"],
-        "classifier_bias": protomaml_weights["classifier_bias"]
     })
 
     return task_head_weights
