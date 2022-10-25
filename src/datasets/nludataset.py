@@ -10,12 +10,14 @@ from torch.utils.data import IterableDataset
 
 from .metadataset import IterableLanguageTaskDataset, SPECIAL_TOKEN_IDS
 from .metadataloader import MetaCollator
+from .nludataloader import NLUCollator
 
 logger = logging.getLogger(__name__)
 
 # static method for generating N-way k-shot self-supervised meta learning tasks 
 generate_N_K_samples = IterableLanguageTaskDataset.generate_N_K_samples
 meta_collate = MetaCollator(return_standard_labels=False)
+nlu_collate = NLUCollator()
 
 class NLUDatasetGenerator(metaclass=abc.ABCMeta):
 
@@ -30,6 +32,18 @@ class NLUDatasetGenerator(metaclass=abc.ABCMeta):
         else: 
             self.language_task_kwargs = None
 
+    @property
+    @abc.abstractmethod
+    def num_classes(self) -> int:
+        """ The number of classes in the current NLU task"""
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def task_type(self) -> str:
+        """ The type of NLU task (e.g. classifiation)"""
+        raise NotImplementedError
+
     @abc.abstractmethod
     def __iter__(self):
         raise NotImplementedError()
@@ -41,7 +55,7 @@ class NLUDataset(IterableDataset, metaclass=abc.ABCMeta):
     used in conjugtion with the NLUDataLoader.
     """
 
-    def __init__(self, lng, file_path, language_task_kwargs=None, **kwargs): 
+    def __init__(self, lng, file_path, language_task_kwargs=None, K=None, **kwargs): 
         """
         For a given language string and data filepath, establishes an IterableDataset that 
         iterates over and processes the NLU data for that language. The language_task_kwargs
@@ -54,15 +68,22 @@ class NLUDataset(IterableDataset, metaclass=abc.ABCMeta):
         self.file_path = file_path
 
         self.language_task_kwargs = language_task_kwargs
+        self.K = K 
 
     @property
     def language(self):
         return self._lng
 
+    @property
+    @abc.abstractmethod
+    def num_classes(self):
+        """ The number of classes in the current NLU task """
+        raise NotImplementedError
+
     @abc.abstractmethod
     def preprocess_line(self, line, process_for_adaptation=False):
         """
-        For a given text input line, splits, tokenizes and otherwise processes the line.
+        For a given text input line, splits, tokenizes and otherwise preprocesses the line.
         If process_for_adaptation is set, returns an iterablable of tokenized lines.
 
         Args: 
@@ -168,10 +189,33 @@ class NLUDataset(IterableDataset, metaclass=abc.ABCMeta):
         return adaptation_batch
 
 
+    def generate_N_K_samples(self): 
+        """ 
+        Generates an N-way K-shot support set for a given NLU task that is used to finetune a
+        pretrained LM model on a given NLU task.
+        """
+
+        assert(self.K is not None),\
+            "K-shot needs to be specified to generate an N-way K-shot NLU support batch sample"
+
+        support_set = defaultdict(list)
+
+        with open(self.file_path, 'r') as f:
+            for line in f: 
+                label_id, input_ids = self.preprocess_line(line)
+
+                if len(support_set[label_id]) < self.K:
+                    support_set[label_id].append(input_ids)
+
+                if len(support_set) == self.num_classes * self.K:
+                    break
+                
+        return nlu_collate(support_set)
+
+
     def __iter__(self): 
         """ Reads over file and preprocesses each of the lines """
         with open(self.file_path, 'r') as f:
             for line in f:
-                # tokenize line 
-                processed_line = self.preprocess_line(line)
-                yield processed_line
+                # tokenize line - recall this method needs to implemented by a subclass
+                yield self.preprocess_line(line)

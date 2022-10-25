@@ -149,7 +149,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 base_model. Should have shape: (batch_size, sequence_length, hidden_size)
             * data_batch (dict): Batch of data for a forward pass through the model 
                 (see run_inner_loop for information on the data structure)
-            * task_head_weights (dict): weights used by the task head (in this the classifier head)
+            * task_head_weights (dict): Weights used by the task head (in this the classifier head)
             * task_type (str): Type of task (e.g. 'classification')
         Returns: 
             * logits ([torch.Tensor]): Logits resulting from forward pass 
@@ -433,7 +433,7 @@ class MetaBaseLearner(BaseLearner):
         self,
         data_batch_list,
         params,
-        lm_head_weights,
+        task_head_weights,
         learning_rate,
         num_inner_steps,
         optimize_classifier=False,
@@ -456,9 +456,9 @@ class MetaBaseLearner(BaseLearner):
         Params:
             * data_batch_list (dict): Batches of data that are used for training the model in the  
                 inner loop (see run_inner_loop for information on the data structure)
-            * params (iterable): Iterable of torch.nn.Paramater()s
+            * params (iterable): Iterable of torch.nn.Parameter()s
                 (the params that we want to evaluate our model at)
-            * lm_head_weights (dict): Weights of the lm classification head
+            * task_head_weights (dict): Weights of the model head
             * learning_rate (torch.nn.Parameter or torch.nn.ParameterList): The learning rate 
                 used to update the model parameters. Will be a ParameterList if we are storing
                 per-layer specific learning rates. 
@@ -482,7 +482,7 @@ class MetaBaseLearner(BaseLearner):
 
         for num_step in range(num_inner_steps):
             
-            if self.use_multiple_samples: 
+            if self.use_multiple_samples and not evaluation_mode: 
                 data_batch = data_batch_list[num_step]
             else:
                 data_batch = data_batch_list[0]
@@ -493,11 +493,10 @@ class MetaBaseLearner(BaseLearner):
                 attention_mask=data_batch['attention_mask'],
                 params=adapted_params
             )
-
             _, loss = self._compute_task_loss(
                 outputs,
                 data_batch,
-                lm_head_weights,
+                task_head_weights,
                 task_type='classification'
             )
 
@@ -547,10 +546,10 @@ class MetaBaseLearner(BaseLearner):
             if optimize_classifier:
                 classifier_grads = torch.autograd.grad(
                     outputs=loss,
-                    inputs=lm_head_weights.values(),
+                    inputs=task_head_weights.values(),
                 )
-                for idx, weight_name in enumerate(lm_head_weights.keys()):
-                    lm_head_weights[weight_name] = lm_head_weights[weight_name] - \
+                for idx, weight_name in enumerate(task_head_weights.keys()):
+                    task_head_weights[weight_name] = task_head_weights[weight_name] - \
                                                     self.classifier_lr * classifier_grads[idx]
 
         return adapted_params

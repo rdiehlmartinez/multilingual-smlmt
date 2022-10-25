@@ -4,7 +4,11 @@ __author__ = 'Richard Diehl Martinez '
 import torch
 
 from torch.utils.data import DataLoader
+
 from .metadataset import MASK_TOKEN_ID
+
+from ..utils.data import base_collate_fn
+
 
 class MetaCollator(object):
 
@@ -51,56 +55,11 @@ class MetaCollator(object):
         
         task_name, (support_samples, query_samples) = batch[0] # only 1-task per batch 
 
-        def process_batch(batch_samples):
-            """ 
-            Helper function to process samples from either the support or query sets,
-            and return a dictionary of input_ids, input_target_idx, label_ids and attention_mask
-            (i.e. the expected data structure returned by meta_collate).
-            """
-
-            batch_inputs = []
-            batch_input_target_idx = []
-            batch_labels = []
-            batch_max_seq_len = 0 
-
-            for idx, (masked_tok_id, subword_samples) in enumerate(batch_samples.items()):
-                # randomly assigns each subword_idx to a number in range(N) if not using 
-                # return_standard_labels; otherwise use the actual token id that is masked
-                # recall batch_samples is a dict({tok id: [samples]})
-                for subword_sample in subword_samples:
-
-                    if self.return_standard_labels:
-                        batch_labels.append(masked_tok_id)
-                    else:
-                        batch_labels.append(idx) 
-                        
-                    if len(subword_sample) > batch_max_seq_len:
-                        batch_max_seq_len = len(subword_sample)
-                    batch_inputs.append(subword_sample)
-                
-            # NOTE: Padding token needs to be 1, in order to be consistent with HF tokenizer: 
-            input_tensor = torch.ones((len(batch_inputs), batch_max_seq_len))
-
-            for idx, sample in enumerate(batch_inputs): 
-                input_tensor[idx, :len(sample)] = torch.tensor(sample)
-                # NOTE: we are using CLS as the token we apply the classification layer over
-                batch_input_target_idx.append(0)
-
-            input_target_idx = torch.tensor(batch_input_target_idx)
-            label_tensor = torch.tensor(batch_labels)
-            attention_mask_tensor = (input_tensor != 1)
-
-            processed_batch = {
-                "input_ids": input_tensor.long(),
-                "input_target_idx": input_target_idx.long(),
-                "label_ids": label_tensor.long(),
-                "attention_mask": attention_mask_tensor.int()
-            }
-
-            return processed_batch
-
-        support_batch_list = [process_batch(support_sample) for support_sample in support_samples]    
-        query_batch = process_batch(query_samples)
+        support_batch_list = [
+            base_collate_fn(support_sample, self.return_standard_labels)
+            for support_sample in support_samples
+        ]    
+        query_batch = base_collate_fn(query_samples, self.return_standard_labels)
 
         return (task_name, support_batch_list, query_batch)
     

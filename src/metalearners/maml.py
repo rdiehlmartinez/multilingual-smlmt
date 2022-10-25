@@ -223,7 +223,7 @@ class MAML(MetaBaseLearner):
         phi = self._adapt_params(
             data_batch_list=support_batch_list, 
             params=self.model_params, 
-            lm_head_weights=adapted_lm_head,
+            task_head_weights=adapted_lm_head,
             learning_rate=self.inner_layers_lr,
             num_inner_steps=num_inner_steps,
             clone_params=True,
@@ -255,11 +255,10 @@ class MAML(MetaBaseLearner):
 
     def run_finetuning(
         self,
+        support_batch,
         task_type,
-        finetune_dataloader,
         n_labels,
-        task_head_init_method,
-        max_finetuning_batch_steps=-1,
+        adaptation_batch=None,
         **kwargs
     ): 
         """
@@ -267,13 +266,12 @@ class MAML(MetaBaseLearner):
         parameters on a given dataset. 
         
         Args: 
+            * support_batch (dict): Dictionary corresponding to the support batch for finetuning 
+                the model on a given task.
             * task_type (str): Type of task (e.g. 'classification')
-            * finetune_dataloader (torch.data.Dataloader): The dataset for finetuning the model on
-                is passed in as a dataloader (i.e. NLUDataloader)
             * n_labels (int): The number of labels in the given finetuning task
-            * task_head_init_method (str): Method for initializing task head 
-            * max_finetuning_batch_steps (int): Optional maximum number of batch steps to take 
-                for model finetuning 
+            * adaptation_batch (dict): Dictionary of data for adapting the model weights of the 
+                platipus model to a given language 
 
         Returns:
             * inference_params dict containing: 
@@ -289,15 +287,15 @@ class MAML(MetaBaseLearner):
         self.functional_model.train()
 
         ### Initializing the task head used for the downstream NLU task
-        task_init_data_batch = move_to_device(next(iter(finetune_dataloader)), self.base_device)
+        support_batch = move_to_device(support_batch, self.base_device)
         init_kwargs = self.get_task_init_kwargs(
-            task_head_init_method,
+            self.lm_head_init_method,
             n_labels,
-            data_batch=task_init_data_batch
+            data_batch=support_batch if 'protomaml' in self.lm_head_init_method else None,
         )
         task_head_weights = TaskHead.initialize_task_head(
             task_type=task_type,
-            method=task_head_init_method,
+            method=self.lm_head_init_method,
             init_kwargs=init_kwargs
         )
 
@@ -314,28 +312,17 @@ class MAML(MetaBaseLearner):
             detached_p.requires_grad = True
             finetuned_task_head_weights[k] = detached_p
 
-        finetune_params = itertools.chain(finetuned_model_params,
-                                          finetuned_task_head_weights.values())
-        finetune_optimizer = torch.optim.Adam(params=finetune_params)
-
-        for batch_idx, data_batch in enumerate(finetune_dataloader):
-            data_batch = move_to_device(data_batch, self.base_device)
-            finetune_optimizer.zero_grad()
-
-            # run SGD on the finetuned parameters
-
-            outputs = self.functional_model.forward(input_ids=data_batch['input_ids'],
-                                                    attention_mask=data_batch['attention_mask'],
-                                                    params=finetuned_model_params)
-
-            _, loss = self._compute_task_loss(outputs, data_batch, finetuned_task_head_weights, 
-                                              task_type=task_type)
-
-            loss.backward()
-            finetune_optimizer.step()
-
-            if max_finetuning_batch_steps > 0 and (batch_idx + 1) >= max_finetuning_batch_steps:
-                break
+        support_batch = move_to_device(support_batch, self.base_device)
+        finetuned_model_params = self._adapt_params(
+            data_batch_list=[support_batch], 
+            params=finetuned_model_params, 
+            task_head_weights=finetuned_task_head_weights,
+            learning_rate=self.inner_layers_lr,
+            num_inner_steps=self.num_learning_steps,
+            clone_params=False,
+            optimize_classifier=True,
+            evaluation_mode=True
+        )
 
         inference_params = {
             "finetuned_params": finetuned_model_params, 
@@ -364,6 +351,7 @@ class MAML(MetaBaseLearner):
                 datapoint passed in from the inference_dataloader as an int. 
             * loss (int): The value of the classification loss on the inference dataset.
         """
+
         if not hasattr(self, "functional_model"):
             # If the model is only being evaluated (and not being finetuned) it might not have
             # a functionalized version

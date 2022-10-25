@@ -55,6 +55,7 @@ class MetaDataset(IterableDataset):
             "task_sampling_method",
             fallback="random"
         )
+        
         if self.task_sampling_method == 'proportional':
             self.task_sampling_prop_rate = config.getfloat(
                 "META_DATASET",
@@ -282,7 +283,7 @@ class IterableLanguageTaskDataset(object):
     def split_task_samples(self, support_samples): 
         """
         Splits up support_samples into a list of length num_task_samples that each contain a 
-        sample of an N-way K-shot task. Is only called if self.num_task_samples > 1.
+        sample of an N-way K-shot task. 
 
         Args: 
             * support_samples {token_id : [K*num_task_samples samples of token_id masked out]}: 

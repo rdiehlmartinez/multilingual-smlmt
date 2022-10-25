@@ -5,6 +5,7 @@ import logging
 import os
 
 from collections import defaultdict
+from typing import Tuple, List
 
 from transformers import XLMRobertaTokenizer
 
@@ -30,7 +31,7 @@ class XNLIDatasetGenerator(NLUDatasetGenerator):
         We assume that the data for the xnli task has been downloaded as part of the 
         XTREME cross-lingual benchmark (https://github.com/google-research/xtreme).
 
-        Initializes a generator class that yield at each iteration a tuple of 
+        Initializes a generator class that yields at each iteration a tuple of 
         Dataset objects each representing a language in the XNLI corpus which are
         the data for (respectively) finetuning and evaluating the model on.
         """
@@ -39,15 +40,13 @@ class XNLIDatasetGenerator(NLUDatasetGenerator):
         self.translated_root_path = os.path.join(self.root_path, "translate-train")
 
         # whether the evaluation is going to be done on dev or on test
-        self.evaluation_partition = config.get("EVALUATION", "partition", fallback="dev")
-
-        # how to initialize the XNLI (aka. classification) task head
-        self.task_head_init_method = config.get("XNLI", "task_head_init_method", fallback="random")
+        self.evaluation_partition = config.get("XNLI", "evaluation_partition")
 
         self.language_files = self._get_language_files(self.root_path)
 
-        super().__init__(config)
+        self.K = config.getint("XNLI", "k")
 
+        super().__init__(config)
 
     def _get_language_files(self, root_path):
         """ 
@@ -96,10 +95,19 @@ class XNLIDatasetGenerator(NLUDatasetGenerator):
             
         return language_files
 
+    @property
+    def num_classes(self):
+        # contradiction, entailment, neutral 
+        return 3
+
+    @property
+    def task_type(self): 
+        return 'classification'
+
     def __iter__(self):
         """ 
-        At each iteration yields XNLIDatasets which are the data for (respectively)
-        finetuning and evaluating the model on.
+        At each iteration yields a batch of support data and an iterable evaluation dataset which
+        are used for finetuning and evaluating the trained model on. 
         """
 
         for language_file_dict in self.language_files:
@@ -107,13 +115,17 @@ class XNLIDatasetGenerator(NLUDatasetGenerator):
             # english which did not need to be translated 
             finetune_translated = language_file_dict['finetune']['lng'] != "en"
 
-            finetune_dataset = XNLIDataset(**language_file_dict['finetune'],
-                                           language_task_kwargs=self.language_task_kwargs,
-                                           translated=finetune_translated)
+            support_batch = XNLIDataset(
+                **language_file_dict['finetune'],
+                language_task_kwargs=self.language_task_kwargs,
+                K=self.K,
+                translated=finetune_translated,
+                ).generate_N_K_samples()
+
             evaluation_dataset = XNLIDataset(**language_file_dict['evaluation'],
                                              language_task_kwargs=self.language_task_kwargs)
 
-            yield (finetune_dataset, evaluation_dataset)
+            yield (support_batch, evaluation_dataset)
 
 
 class XNLIDataset(NLUDataset):
@@ -122,9 +134,11 @@ class XNLIDataset(NLUDataset):
     MAX_SEQ_LENGTH = 128
 
     # xnli classes
-    LABEL_MAP = {"contradiction":0,
-                 "entailment":1,
-                 "neutral":2}
+    LABEL_MAP = {
+        "contradiction": 0,
+        "entailment": 1,
+        "neutral": 2
+    }
 
     """
     Dataset for processing data for a specific language in the XNLI corpus. 
@@ -142,7 +156,15 @@ class XNLIDataset(NLUDataset):
         super().__init__(**kwargs)
         self.translated = translated
 
-    def preprocess_line(self, line, process_for_adaptation=False):
+    @property 
+    def num_classes(self): 
+        return 3
+
+    def preprocess_line(
+        self,
+        line: str,
+        process_for_adaptation: bool = False
+    ) -> Tuple[List[int], int]:
         """
         For a given text input line, splits the line into the hypothesis and the premise; and 
         tokenizes the two lines. If process_for_adaptation is set, returns a tuple of the two 
@@ -158,8 +180,8 @@ class XNLIDataset(NLUDataset):
             If process_for_adaptation: 
                 * Tuple of lists corresponding to tokenized hypothesis and premise 
             Else:
-                * input_ids (list): List of tokens of combined hypothesis and premise
                 * label_id (int): Label for the current sample
+                * input_ids (list): List of tokens of combined hypothesis and premise
         """
 
         # splitting information from tsv
@@ -181,43 +203,59 @@ class XNLIDataset(NLUDataset):
             text_b_token_ids = tokenizer.encode(text_b)
             return (text_a_token_ids, text_b_token_ids)
         else:
+            label_id = XNLIDataset.LABEL_MAP[label]
+
             # tokenizing inputs
             inputs = tokenizer.encode_plus(text_a, text_b, add_special_tokens=True,
                                            max_length=XNLIDataset.MAX_SEQ_LENGTH)
-            
             input_ids = inputs['input_ids']
-            label_id = XNLIDataset.LABEL_MAP[label]
 
-            return [input_ids, label_id]
+            return (label_id, input_ids)
 
 def main():
     """ Basic testing of XNLI Dataset"""
     from configparser import ConfigParser
 
-    from nludataloader import NLUDataLoader
+    from .nludataloader import NLUDataLoader
 
     config = ConfigParser()
     config.add_section('XNLI')
-    config.set('XNLI', 'root_path', '../../data/xtreme/download/xnli')
-    config.set('XNLI', 'use_few_shot_adaptation', 'True')
-
+    config.set('XNLI', 'root_path', '../../rds-personal-3CBQLhZjXbU/problyglot_data/xtreme/download/xnli')
+    config.set('XNLI', 'evaluation_partition', "dev")
+    config.set('XNLI', 'k', '16')
 
     config.add_section('LEARNER')
-    config.set('LEARNER', 'method', 'platipus')
+    config.set('LEARNER', 'method', 'maml')
 
-    config.add_section('LANGUAGE_TASK')
-    config.set('LANGUAGE_TASK', 'n', '2')
-    config.set('LANGUAGE_TASK', 'k', '2')
-    config.set('LANGUAGE_TASK', 'q', '20')
-    config.set('LANGUAGE_TASK', 'sample_size', '10_000')
-    config.set('LANGUAGE_TASK', 'buffer_size', '100_000_000')
-    config.set('LANGUAGE_TASK', 'mask_sampling_method', 'proportional')
-    config.set('LANGUAGE_TASK', 'mask_sampling_prop_rate', '0.3')
-    config.set('LANGUAGE_TASK', 'max_seq_len', '128')
+    # config.add_section('LANGUAGE_TASK')
+    # config.set('LANGUAGE_TASK', 'n', '2')
+    # config.set('LANGUAGE_TASK', 'k', '2')
+    # config.set('LANGUAGE_TASK', 'q', '20')
+    # config.set('LANGUAGE_TASK', 'sample_size', '10_000')
+    # config.set('LANGUAGE_TASK', 'buffer_size', '100_000_000')
+    # config.set('LANGUAGE_TASK', 'mask_sampling_method', 'proportional')
+    # config.set('LANGUAGE_TASK', 'mask_sampling_prop_rate', '0.3')
+    # config.set('LANGUAGE_TASK', 'max_seq_len', '128')
 
     dataset_generator = XNLIDatasetGenerator(config)
 
-    for finetune_dataset, evaluation_dataset in dataset_generator:
+    for support_batch, evaluation_dataset in dataset_generator:
+
+        eval_dataloader = NLUDataLoader(evaluation_dataset, batch_size=64)
+
+        print(support_batch['input_ids'].shape)
+        print(support_batch['label_ids'].shape)
+        print(support_batch['label_ids'])
+
+
+        for batch in eval_dataloader:
+            print("EVAL DATASET")
+            print(batch['input_ids'].shape)
+            print(batch['label_ids'].shape)
+
+            break
+
+        exit()
         
         if finetune_dataset.language == "en":
             adaptation_batch = finetune_dataset.get_adaptation_batch()
