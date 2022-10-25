@@ -76,7 +76,7 @@ Pillow==8.4.0
 prometheus-client==0.13.0
 promise==2.3
 prompt-toolkit==3.0.26
-protobuf==3.19.4
+protobuf==3.19.5
 psutil==5.9.0
 ptyprocess==0.7.0
 pyarrow==6.0.1
