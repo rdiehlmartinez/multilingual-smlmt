@@ -19,14 +19,20 @@ from ..taskheads import TaskHead, ClassificationHead
 
 from ..utils import set_seed
 
+# imports for typing 
+from ..models import BaseModel
+from typing import Tuple, List, Dict, Union
+from collections.abc import Iterator
+from multiprocessing import Queue, Event
+
 logger = logging.getLogger(__name__)
 
 class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def __init__(
         self,
-        base_model,
-        base_device: str,
+        base_model: BaseModel,
+        base_device: torch.device,
         seed: int,
         lm_head_init_method: str = 'protomaml',
         lm_head_n: Union[int, str] = 100,
@@ -39,12 +45,12 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         
         Args: 
             * base_model (implements a BaseModel)
-            * base_device (str): what device to use for training (either 'cpu' or 'gpu) 
-            * seed (int): Seed for reproducibility 
-            * language_head_init_method (str): How to initialize the language head classifier layer
-            * lm_head_n (int): Size of n-way classification used for generating the language 
+            * base_device: What device to use for training (either 'cpu' or 'gpu) 
+            * seed: Seed for reproducibility 
+            * language_head_init_method: How to initialize the language head classifier layer
+            * lm_head_n: Size of n-way classification used for generating the language 
                 modeling tasks used for training.
-            * retain_lm_head (bool): Indicate whether we should maintain a single task head 
+            * retain_lm_head: Indicate whether we should maintain a single task head 
                 that is learned over the course of meta training, or whether for each task we 
                 should initialize a new task head.
             * use_multiple_samples: We can specify whether each learning step that the BaseLearner
@@ -73,12 +79,12 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             # the task head with protomaml 
             assert("protomaml" not in self.lm_head_init_method),\
                 "retain_task_head cannot be used with protomaml lm head initialization"
-            init_kwargs = self.get_task_init_kwargs(lm_head_init_method, self.lm_head_n)
-            self.retained_lm_head = TaskHead.initialize_task_head(
-                task_type='classification',
-                method=lm_head_init_method,
-                init_kwargs=init_kwargs,
+            init_kwargs = self.get_task_init_kwargs(
+                'classification',
+                self.lm_head_init_method,
+                self.lm_head_n,
             )
+            self.retained_lm_head = TaskHead.initialize_task_head(**init_kwargs)
 
         else: 
             # If we are re-initializing the LM head for each training task, then we should use 
@@ -99,22 +105,23 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def get_task_init_kwargs(
         self,
-        task_init_method,
-        n_labels,
-        data_batch=None,
-        device=None,
-        **kwargs
-    ):
+        task_type: str,
+        task_init_method: str,
+        n_labels: int,
+        data_batch: Dict[str, torch.Tensor] = None,
+        device: torch.device = None,
+    ) -> Dict[str, Any]:
         """ 
         Helper method for generating keyword arguments that can be passed into a task head 
         initialization method
         
         Args: 
-            * task_init_method (str): Method for initializing the task head
-            * n_labels (int): Number of labels defined by the task (i.e. classes)
-            * data_batch (dict): Batch of data used to initialize the task head if using 
+            * task_type: Type of task head to initialize (e.g. 'classification')
+            * task_init_method: Method for initializing the task head
+            * n_labels: Number of labels defined by the task (i.e. classes)
+            * data_batch: Batch of data used to initialize the task head if using 
                 the protomaml task_init_method
-            * device (str): Device type used to initialize the task head with, if not 
+            * device: Device type used to initialize the task head with, if not 
                 specified defaults to self.base_device
 
         Returns:
@@ -138,28 +145,33 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
     ###### Model training and evaluation helper methods ######
 
     @staticmethod
-    def _compute_task_loss(model_outputs, data_batch, task_head_weights, task_type):
+    def _compute_task_loss(
+        model_outputs: torch.Tensor,
+        data_batch: Dict[str, torch.Tensor],
+        task_head_weights: torch.nn.ParameterDict,
+        task_type: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Helper function for computing the task loss on a given batch of data. We assume that the 
         data has already been passed through the base_model - the result of which is model_outputs
         (i.e. the final layer's hidden states). 
 
         Args: 
-            * model_outputs (torch.Tensor): Result of passing data_batch through the 
-                base_model. Should have shape: (batch_size, sequence_length, hidden_size)
-            * data_batch (dict): Batch of data for a forward pass through the model 
+            * model_outputs: Result of passing data_batch through the base_model. 
+                Should have shape: (batch_size, sequence_length, hidden_size)
+            * data_batch: Batch of data for a forward pass through the model 
                 (see run_inner_loop for information on the data structure)
-            * task_head_weights (dict): Weights used by the task head (in this the classifier head)
+            * task_head_weights: Weights used by the task head (in this the classifier head)
             * task_type (str): Type of task (e.g. 'classification')
         Returns: 
-            * logits ([torch.Tensor]): Logits resulting from forward pass 
-            * loss (int): Loss of data 
+            * logits: logits for the classification task
+            * loss: loss for the classification task
         """
 
         #indexing into sequence layer of model_outputs -> (batch_size, hidden_size) 
         batch_size = model_outputs.size(0)
         last_hidden_state = model_outputs[torch.arange(batch_size),
-                                              data_batch['input_target_idx']]
+                                          data_batch['input_target_idx']]
 
         if task_type == 'classification':
             head = ClassificationHead()
@@ -167,17 +179,25 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             logger.exception(f"Invalid task type: {task_type}")
             raise Exception(f"Invalid task type: {task_type}")
 
-        logits, loss = head(model_output=last_hidden_state, labels=data_batch['label_ids'],
-                            weights=task_head_weights)
+        logits, loss = head(
+            model_output=last_hidden_state,
+            labels=data_batch['label_ids'],
+            weights=task_head_weights
+        )
 
         return (logits, loss)
 
     ###### Model training methods ######
 
-    def optimizer_step(self, set_zero_grad=False):
+    def optimizer_step(self, set_zero_grad: bool = False) -> None:
         """ 
         Take a global update step of the meta learner params; optionally set the gradients of the 
         meta learner gradient tape back to zero.
+
+        Args:
+            * set_zero_grad (bool): Whether to set the gradients of the meta learner gradient tape
+                back to zero after the optimizer step. Defaults to False.
+
         """
         assert(hasattr(self, 'optimizer')),\
             "Learner cannot take optimizer step - needs to define an optimizer attribute"
@@ -188,12 +208,17 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
     
     def forward(self, learner, support_batch, query_batch, device):
         """ 
-        NOTE: Only torch.DistributedDataParallel should indirectly call this - used as a wrapper to 
-              run_inner_loop. Unless you know what you're doing, don't call this method.
+        NOTE: Only the DistributedDataParallel version of this model should indirectly call this.
+              Used as a wrapper to run_inner_loop. 
+              Unless you know what you're doing, don't call this method.
         """
         return learner.run_inner_loop(support_batch, query_batch, device)
 
-    def setup_DDP(self, rank, world_size):
+    def setup_DDP(
+        self,
+        rank: int,
+        world_size: int
+    ) -> Tuple[torch.device, torch.nn.parallel.DistributedDataParallel]:
         """ 
         Helper method for setting up distributed data parallel process group and returning 
         a wrapper DDP instance of the learner
@@ -206,7 +231,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             * device (int): Device to run model on
             * ddp (torch.DistributedDataParallel): Wrapped DDP learner
         """
-        device = f"cuda:{rank}"
+        device = torch.device(f"cuda:{rank}")
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = '32432'
         dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -217,9 +242,15 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         ddp = DDP(self, device_ids=[rank], find_unused_parameters=True)
         return (device, ddp)
 
-    @abc.abstractmethod
-    def run_inner_loop_mp(self, rank, world_size, data_queue, loss_queue, step_optimizer,
-                          num_tasks_per_iteration):
+   def run_inner_loop_mp(
+        self,
+        rank: int,
+        world_size: int,
+        data_queue: Queue,
+        loss_queue: Queue,
+        step_optimizer: Event, 
+        num_tasks_per_iteration: int,
+    ) -> None:
         """
         Entry point for running inner loop using multiple processes. Sets up DDP init process
         group, wraps learner in DDP and calls forward/backward on the DDP-wrapped model.
@@ -234,24 +265,63 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             * num_tasks_per_iteration (int): Number of tasks per iteration that the user specifies
                 in the experiment config file
         """
-        raise NotImplementedError()
+
+        device, ddp = self.setup_DDP(rank, world_size)
+
+        while True: 
+            # The main process sends signal to update optimizers
+
+            while True: 
+                # Waiting for the next batch of data 
+                # NOTE: If there is no data either 1) the dataloading pipeline is taking a while 
+                # or 2) the main process is waiting for all the workers to finish 
+                try:
+                    batch = data_queue.get(block=False)[0]
+                    break
+                except EmptyQueue: 
+                    pass
+
+                if step_optimizer.is_set():
+                    # make sure all workers have taken an optimizer step
+                    self.optimizer_step(set_zero_grad=True)
+                    dist.barrier()
+
+                    # once all workers have update params clear the flag to continue training
+                    step_optimizer.clear()
+
+                time.sleep(1) 
+
+            task_name, support_batch, query_batch = batch
+
+            task_loss = ddp(self, support_batch, query_batch, device)
+            task_loss = task_loss/num_tasks_per_iteration
+            task_loss.backward()
+
+            loss_queue.put([task_loss.detach().item()])
 
     @abc.abstractmethod
-    def run_inner_loop(self, support_batch, query_batch=None, device=None, **kwargs): 
+    def run_inner_loop(
+        self,
+        support_batch_list: List[Dict[str, torch.Tensor]],
+        query_batch: Dict[str, torch.Tensor],
+        device: torch.device = None, 
+        **kwargs
+    ): 
         """ 
         Run an inner loop optimization step (in the context of meta learning); assumes 
         that the class contains the model that is to-be meta-learned.
 
         Args:
-            * support_batch: A dictionary containing the following information for the support set
+            * support_batch_list: A list of task batches, each batch of task data is represented
+                as a dictionary containing the following information:
                 * input_ids (torch.tensor): Input tensors of shape (N*K, max_seq_len)
                 * input_target_idx (torch.tensor): Tensor indicating for each sample at what index
                     we apply the final classification layer 
                 * label_ids (torch.tensor): Tensor of labels corresponding to masked out subword id
                 * attention_mask (torch.tensor): Tensor indicating which tokens in input_ids are
                     not pad tokens
-            * query_batch [optional]: Same as support_batch, but for the data of the query set.
-                This argument might be optional depending on how the learner is implemented.
+            * query_batch: Same as the dictionary structure of the support_batch, but for the data
+                of the query set 
             * device: Optional string to specify a device to override base_device
 
         Returns: 
@@ -262,32 +332,43 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
     ###### Model evaluation methods ######
 
     @abc.abstractmethod
-    def run_finetuning(self, task_type, finetune_dataloader, *args, **kwargs):
+    def run_finetuning(
+        self,
+        support_batch: Dict[str, torch.Tensor],
+        task_type: str,
+        n_labels: int,
+    ) -> Dict[str, Any]:
         """
-        Finetunes the model on the data of finetune_dataloader.
+        Finetunes the model on a given support_batch for a model of type task_type with n_labels.
 
         Args:
-            * task_type (str): Type of task to finetune on (e.g. classification)
-            * finetune_dataloader (torch.data.Dataloader): The dataset for finetuning the model is
-                passed in as a dataloader (in most cases this will be an NLUDataloader)
+            * support_batch: A batch of task data represented as a dictionary containing the
+                data for the support set of a task to finetune on.
+            * task_type: The type of task to finetune on.
+            * n_labels: The number of labels for the task to finetune on.
 
         Returns:
-            * inference_params ({}): Returns any sort of params that need to be used for the 
+            * inference_params: Returns any sort of params that need to be used for the 
                 run_inference_classification method 
         """ 
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def run_inference(self, task_type, inference_dataloader, *args, **kwargs):
+    def run_inference(
+        self,
+        inference_dataloader: torch.utils.data.DataLoader,
+        task_type: str,
+        **inference_params: Dict[str, Any],
+    ) -> Tuple[List[int], int]:
         """
-        Evaluates the model on the data of inference_dataloader. This should only be called once 
-        run_finetuning has been run.
+        Evaluates the model on the data of inference_dataloader which corresponds to a task of type 
+        task_type. This should only be called once run_finetuning has been run.
 
         Args: 
-            * task_type (str): Type of task to evaluate on; should be the same as the task type 
+            * inference_dataloader: The dataset on which to perform model inference on.
+            * task_type: Type of task to evaluate on; should be the same as the task type 
                 passed into run_finetuning
-            * inference_dataloader (torch.data.Dataloader): The dataset for inference is passed
-                in as a dataloader (in most cases this will be an NLUDataloader)
+            * inference_params: Any params that need to be used for the inference task
 
         Returns: 
             * predictions ([int]): A dictionary storing the model's predictions for each 
@@ -301,7 +382,7 @@ class MetaBaseLearner(BaseLearner):
 
     def __init__(
         self,
-        base_model,
+        base_model: BaseModel,
         optimizer_type: str = 'adam',
         meta_lr: Union[float, str] = 1e-2,
         inner_lr: Union[float, str] = 1e-2,
@@ -386,7 +467,7 @@ class MetaBaseLearner(BaseLearner):
 
     ### Base setup functionality for meta learning models
 
-    def setup_optimizer(self):
+    def setup_optimizer(self) -> None:
         """ Helper function for setting up the (meta) optimizer """
         if self.optimizer_type == 'adam': 
             self.optimizer = torch.optim.Adam(params=self.meta_params_iter(), lr=self.meta_lr)
@@ -394,28 +475,37 @@ class MetaBaseLearner(BaseLearner):
             logger.exception(f"Invalid optimizer type: {optimizer_type}")
             raise Exception(f"Invalid optimizer type: {optimizer_type}")
 
-    def functionalize_model(self):
-        """ Helper function for converting base_model into a functionalized form"""
+    def functionalize_model(self) -> None:
+        """
+        Helper function for converting base_model into a functionalized form
+        """
         self.functional_model = higher.patch.make_functional(module=self.base_model)
 
         # NOTE: these two lines are SUPER important (otherwise computation graph explodes)w
         self.functional_model.track_higher_grads = False
         self.functional_model._fast_params = [[]]
 
-    def parameters(self):
-        """ Overriding parent behavior to only return meta parameters """
+    def parameters(self) -> List[torch.Tensor]:
+        """ 
+        Overriding parent behavior to only return meta parameters
+        """
         return self.meta_params_iter()
 
     @abc.abstractmethod
-    def meta_params_iter(self):
-        """ Returns an iterator over all of the meta parameters"""
+    def meta_params_iter(self) -> Iterator[torch.Tensor]:
+        """ 
+        Returns an iterator over the meta parameters of the model. 
+        """
         raise NotImplementedError()
 
     # Overriding nn.Module functionality 
-    def state_dict(self):
+    def state_dict(self) -> Dict[str, torch.Tensor]:
         """
         Overriding method to remove placeholder parameters defined by functional model. Called 
         implicitly when saving and loading checkpoints.
+
+        Returns: 
+            * updated_state_dict (Dict[str, torch.Tensor]): Dictionary of model parameters
         """
         original_state_dict = super().state_dict()
         updated_state_dict = OrderedDict()
@@ -428,18 +518,31 @@ class MetaBaseLearner(BaseLearner):
         
         return updated_state_dict
 
+    def setup_DDP( self, **kwargs) -> Tuple[torch.device, torch.DistributedDataParallel]:
+        """ 
+        Overriding parent behavior to ensure that the functionalized model is also wrapped in
+        DDP.
+
+        Returns:
+            * device (int): Device to run model on
+            * ddp (torch.DistributedDataParallel): Wrapped DDP learner
+        """
+        device, ddp = super().setup_DDP(**kwargs)
+        self.functionalize_model()
+        return (device, ddp)
+
     ### Helper function for adapting the functionalized parameters based on some data_batch
     def _adapt_params(
         self,
-        data_batch_list,
-        params,
-        task_head_weights,
-        learning_rate,
-        num_inner_steps,
-        optimize_classifier=False,
-        clone_params=True,
-        evaluation_mode=False,
-    ):
+        data_batch_list: List[Dict[str, torch.Tensor]],
+        params: List[torch.Tensor],
+        task_head_weights: Dict[str, torch.Tensor],
+        learning_rate: Union[torch.nn.Parameter, torch.nn.ParameterList],
+        num_inner_steps: int,
+        optimize_classifier: bool = False,
+        clone_params: bool = True,
+        evaluation_mode: bool = False,
+    ) -> List[torch.Tensor]:
         """ 
         Adapted from: 
         https://github.com/cnguyen10/few_shot_meta_learning
@@ -458,20 +561,20 @@ class MetaBaseLearner(BaseLearner):
                 inner loop (see run_inner_loop for information on the data structure)
             * params (iterable): Iterable of torch.nn.Parameter()s
                 (the params that we want to evaluate our model at)
-            * task_head_weights (dict): Weights of the model head
+            * task_head_weights: Weights of the model head
             * learning_rate (torch.nn.Parameter or torch.nn.ParameterList): The learning rate 
                 used to update the model parameters. Will be a ParameterList if we are storing
                 per-layer specific learning rates. 
-            * num_inner_steps (int): Number of inner steps to use for the adaptation process
-            * optimize_classifier (bool): Whether to train the final classification layer as 
+            * num_inner_steps: Number of inner steps to use for the adaptation process
+            * optimize_classifier: Whether to train the final classification layer as 
                 part of the adaptation process 
-            * clone_params (bool): Whether to clone the params passed in (defaults to True)
-            * evaluation_mode (bool): Whether running this method during evaluation
+            * clone_params: Whether to clone the params passed in (defaults to True)
+            * evaluation_mode: Whether running this method during evaluation
                 (either in finetuning or inference) (defaults to False)
 
         Returns: 
-            * adapted_params (iterable): Iterable of torch.nn.Paramater()s that represent the
-                updated the parameters after running SGD 
+            * adapted_params: List of torch.nn.Parameter()s that represent the updated 
+                parameters after running SGD 
         """                                        
 
         if clone_params:

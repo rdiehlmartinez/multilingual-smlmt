@@ -11,7 +11,7 @@ import json
 
 from configparser import ConfigParser
 
-def set_seed(seed):
+def set_seed(seed: int) -> None:
     ''' Sets seed for reproducibility '''
     if seed < 0: 
         logging.info("Skipping seed setting for reproducibility")
@@ -26,13 +26,13 @@ def set_seed(seed):
     if torch.cuda.is_available() > 0:
         torch.cuda.manual_seed_all(seed)
 
-def setup_config(config_file_path):
+def setup_config(config_file_path: str) -> ConfigParser:
     ''' Reads in a config file using ConfigParser '''
     config = ConfigParser()
     config.read(config_file_path)
     return config
 
-def setup_logger(config_file_path):
+def setup_logger(config_file_path: str) -> None:
     ''' Sets up logging functionality '''
     # Removing handlers that might be associated with environment; and logs
     # out to both stderr and a log file
@@ -52,7 +52,7 @@ def setup_logger(config_file_path):
     )
     logging.info(f"Initializing experiment: {experiment_directory}")
 
-def setup_wandb(config, run_id, resume_training):
+def setup_wandb(config: ConfigParser, run_id: str, resume_training: bool) -> None:
     """
     Sets up logging and model experimentation using weights & biases 
     """
@@ -69,8 +69,8 @@ def setup_wandb(config, run_id, resume_training):
         else: 
             logging.info(f"Starting run with id: {run_id}")
 
-def setup(config_file_path, run_id, resume_num_task_batches):
-    """s
+def setup(config_file_path: str, run_id: str, resume_num_task_batches: int) -> ConfigParser:
+    """
     Reads in config file, sets up logger and sets a seed to ensure reproducibility.
 
     NOTE: The optional keyword arguments (resume_run_id and resume_num_task_batches) should never

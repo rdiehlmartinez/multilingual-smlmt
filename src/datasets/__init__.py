@@ -1,13 +1,17 @@
-# meta datasets and dataloader  for training 
-from .metadataset import MetaDataset
-from .metadataloader import MetaDataLoader
+# --- TRAINING ---
+
+# meta datasets and dataloader for training 
+from .train.metadataset import MetaDataset
+from .train.metadataloader import MetaDataLoader
+
+# --- EVALUATION ---
 
 # nlu dataloader for evaluation
-from .nludataloader import NLUDataLoader
+from .val.nludataloader import NLUDataLoader
 
 # nlu datasets for evaluation
-from .xnlidataset import XNLIDatasetGenerator
+from .val.xnlidataset import XNLIDataGenerator
 
-NLU_DATASET_GENERATOR_MAPPING = {
-    "xnli": XNLIDatasetGenerator
+NLU_TASK_DATA_GENERATOR_MAPPING = {
+    "xnli": XNLIDataGenerator
 }

@@ -3,11 +3,21 @@ __author__ = 'Richard Diehl Martinez'
 
 import torch
 
-def move_to_device(batch, device):
+from typing import Dict, Union, List, Tuple
+
+def move_to_device(batch: dict, device: torch.device) -> Dict[str, torch.Tensor]:
     """ 
-    Helper functinoality for moving a batch of data that is structured as a dictionary (possibly
+    Helper functionality for moving a batch of data that is structured as a dictionary (possibly
     nested) onto a certain device.
+    
+    Args: 
+        * batch (dict): dictionary of data that needs to be moved to a device
+        * device (torch.device): device to move the data to
+    
+    Returns: 
+        * updated_batch (dict): dictionary of data that has been moved to a device
     """
+
     updated_batch = {}
     for key, val in batch.items():
         if isinstance(val, dict):
@@ -21,10 +31,28 @@ def move_to_device(batch, device):
                 updated_batch[key] = val.to(device)
     return updated_batch
 
-def base_collate_fn(batch, return_standard_labels): 
+def base_collate_fn(
+    batch: Union[List[Tuple[int, List[int]]], Dict[int, List[List[int]]]],
+    return_standard_labels: bool
+) -> Dict[str, torch.Tensor]:
     """
     Base functionality for collating a batch of samples. Is used to both generate batches of 
     language modeling task data, as well as NLU task data.
+
+    Args: 
+        * batch: Either a dictionary or a list of tuples that can be iterated over and 
+            yields a tuple containing a label and samples corresponding to a label.
+        * return_standard_labels (bool): Whether to collate the batch to use the token ids of 
+            the masked tokens, or whether to transform the labels to be in range [0, n].
+
+    Returns:
+        * processed_batch (dict): Dictionary containing the following: 
+            * input_ids (torch.tensor): Input tensors of shape (N*K, max_seq_len)
+            * input_target_idx (torch.tensor): Tensor indicating for each sample at what index
+                we apply the final classification layer
+            * label_ids (torch.tensor): Tensor of labels corresponding to masked out subword id
+            * attention_mask (torch.tensor): Tensor indicating which tokens in input_ids 
+                are not pad tokens
     """
 
     if isinstance(batch, dict):

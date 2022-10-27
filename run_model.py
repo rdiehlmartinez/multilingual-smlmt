@@ -6,8 +6,6 @@ import os
 import random
 import signal
 
-import torch.multiprocessing as mp
-
 from src.utils import setup
 from src.problyglot import Problyglot
 

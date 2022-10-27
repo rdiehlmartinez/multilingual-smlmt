@@ -6,6 +6,10 @@ import logging
 
 from collections import defaultdict
 
+# typing import 
+from collections.abc import Callable
+import torch.nn as nn
+
 logger = logging.getLogger(__name__)
 
 class TaskHead(object, metaclass=abc.ABCMeta):
@@ -15,7 +19,9 @@ class TaskHead(object, metaclass=abc.ABCMeta):
     different methods for initializing the task head (e.g. randomly). To initialize a task 
     head, we first define an initialization function that we wrap using the 
     register_initialization_method() method, and then we can call initialize_task_head() with
-    the appropriate parameters.
+    the appropriate parameters. For the initial set of experiments that we will be running, 
+    we will only be using classification tasks, but we will be adding more task heads in the
+    future.
     """
 
     _task_head_initializers = defaultdict(dict)
@@ -26,13 +32,13 @@ class TaskHead(object, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @classmethod
-    def register_initialization_method(cls, initialization_function):
+    def register_initialization_method(cls, initialization_function: Callable) -> Callable:
         """ 
         Decorator function that takes in an initialization function and registers this 
         as a function to use for intitializing the weights of a task head.
         Args: 
-            * initialization_function (type.function): A function that initializes task 
-                head parameters 
+            * initialization_function: function that takes in a task head and initializes
+                the weights of the task head.
         """
         task_type, method = initialization_function.__name__.split('_', 1)
 
@@ -51,15 +57,20 @@ class TaskHead(object, metaclass=abc.ABCMeta):
         return initialization_function
 
     @classmethod
-    def initialize_task_head(cls, task_type, method, init_kwargs): 
+    def initialize_task_head(
+        cls,
+        task_type: str,
+        method: str,
+        **init_kwargs: dict,
+    ) -> nn.ParameterDict:
         """
         Method for initializing the weights of a task head. Reads in two strings, task_type and
         method which jointly specify the task head and type of initialization method to use. 
         Then calls on the corresponding function and forwards the **init_kwargs keyword arguments. 
         
         Args: 
-            * task_type (str): Type of task head (e.g. 'classification')
-            * method (str): Method to use for initializing the weights of the task head 
+            * task_type: Type of task head (e.g. 'classification')
+            * method: Method to use for initializing the weights of the task head 
                 (e.g. 'random')
             * init_kwargs (dict): Keyword arguments used by the initialization function 
         Returns: 

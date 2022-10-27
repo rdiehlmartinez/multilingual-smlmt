@@ -9,6 +9,9 @@ import logging
 from transformers import XLMRobertaModel
 from .base import BaseModel
 
+# typing imports
+from typing import List
+
 logger = logging.getLogger(__name__)
 
 @BaseModel.register
@@ -16,9 +19,12 @@ class XLMR(XLMRobertaModel):
     """ Implementation of XLM-r model (Conneau et al. 2019) https://arxiv.org/abs/1911.02116 """
 
     @classmethod
-    def from_kwargs(cls, pretrained_model_name='xlm-roberta-base', 
-                         trainable_layers=None,
-                         **kwargs): 
+    def from_kwargs(
+        cls,
+        pretrained_model_name: str = 'xlm-roberta-base', 
+        trainable_layers: List[int] = None,
+        **kwargs
+    ) -> None: 
         """ Loading in huggingface XLM-R model for masked LM """
         
         if pretrained_model_name:
@@ -52,7 +58,7 @@ class XLMR(XLMRobertaModel):
 
         return model
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, **kwargs) -> torch.Tensor:
         """ 
         Overriding default forward method to only return the output tensor of hidden states 
         from the final layer - has shape: (batch_size, sequence_length, hidden_size)
@@ -61,5 +67,5 @@ class XLMR(XLMRobertaModel):
         return outputs.last_hidden_state
 
     @property
-    def hidden_dim(self): 
+    def hidden_dim(self) -> int: 
         return self._hidden_dim

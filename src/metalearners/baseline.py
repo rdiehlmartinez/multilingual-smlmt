@@ -15,17 +15,30 @@ from .base import BaseLearner
 from ..taskheads import TaskHead
 from ..utils import move_to_device
 
+# typing imports
+
+from ..models import BaseModel
+
 logger = logging.getLogger(__name__)
+
+# TODO: Add implementation of BaselineLearner
+raise NotImplementedError("BaselineLearner not implemented yet")
 
 class BaselineLearner(BaseLearner):
 
-    def __init__(self, base_model, optimizer_type='adam', lr=1e-2, *args, **kwargs): 
+    def __init__(
+        self,
+        base_model: BaseModel,
+        optimizer_type: str = 'adam',
+        lr: int = 1e-2,
+        **kwargs
+    ) -> None: 
         """
-        BaselineLearner implements a fully-supervised learning process to train
-        a given base_model (serves as a baseline). 
+        BaselineLearner implements a fully-supervised learning process to train a given base_model 
+        (serves as a baseline). 
 
         Args: 
-            * base_model (implementation of BaseModel)
+            * base_model (implementation of BaseModel): The model to be trained
             * optimizer_type (str): The type of optimizer (e.g. 'adam')
             * lr (int): Learning rate of the optimizer
         """
@@ -44,57 +57,6 @@ class BaselineLearner(BaseLearner):
 
     ###### Model training methods ######
 
-    ### Multi Processing Helper Method
-    def run_inner_loop_mp(self, rank, world_size, data_queue, loss_queue, step_optimizer,
-                          num_tasks_per_iteration):
-        """
-        Entry point for running inner loop using multiple processes. Sets up DDP init process
-        group, wraps learner in DDP and calls forward/backward on the DDP-wrapped model.
-
-        Args: 
-            * rank (int): Rank of current GPU 
-            * world_size (int): Number of GPUs should be the same as utils.num_gpus
-            * data_queue (multiprocessing.Queue): Queue from which we read passed in data
-            * loss_queue (multiprocessing.Queue): Queue to which we write loss values
-            * step_optimizer (multiprocessing.Event): Event to signal workers to take an optimizer
-                step
-            * num_tasks_per_iteration (int): Number of tasks per iteration that the user specifies
-                in the experiment config file
-        """
-
-        device, ddp = self.setup_DDP(rank, world_size)
-
-        while True: 
-
-            while True: 
-                # Waiting for the next batch of data 
-                # NOTE: If there is no data either 1) the dataloading pipeline is taking a while 
-                # or 2) the main process is waiting for all the workers to finish 
-                try:
-                    batch = data_queue.get(block=False)[0]
-                    break
-                except EmptyQueue: 
-                    pass
-
-                if step_optimizer.is_set():
-                    # make sure all workers have taken an optimizer step
-                    self.optimizer_step(set_zero_grad=True)
-                    dist.barrier()
-
-                    # once all workers have update params clear the flag to continue training
-                    step_optimizer.clear()
-
-                time.sleep(1) 
-
-            task_name, support_batch, query_batch = batch
-
-            task_loss = ddp(self, support_batch, query_batch, device)
-            task_loss = task_loss/num_tasks_per_iteration
-            task_loss.backward()
-
-            loss_queue.put([task_loss.detach().item()])
-
-    ### Main Inner Training Loop 
     def run_inner_loop(self, support_batch, query_batch=None, device=None, *args, **kwargs): 
         """ 
         Run an inner loop optimization step. Usually this is in the context of meta-learning, but

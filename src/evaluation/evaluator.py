@@ -8,19 +8,17 @@ import wandb
 import numpy as np
 
 from collections import defaultdict
-from ..datasets import NLUDataLoader, NLU_DATASET_GENERATOR_MAPPING
+from ..datasets import NLUDataLoader, NLU_TASK_DATA_GENERATOR_MAPPING
 
 logger = logging.getLogger(__name__)
 
-TASK_PARAMS = {
-    "xnli": {
-        "task_type": "classification",
-        "n_labels": 3, 
-    }
-}
+# Importing type hints
+from typing import List
+from configparser import ConfigParser
+from ..metalearners import BaseLearner
 
 class Evaluator(object): 
-    def __init__(self, config): 
+    def __init__(self, config: ConfigParser) -> None: 
         """ 
         Sets up dataset generators for each eval task provided in the config. The 
         Evaluator class is a general framework for calling the inference procedures
@@ -35,19 +33,27 @@ class Evaluator(object):
 
         self.tasks = tasks_str.split(',')
 
-        self.dataset_generators = {task: NLU_DATASET_GENERATOR_MAPPING[task](config)
-                                    for task in self.tasks}
+        self.task_data_generators = {
+            task: NLU_TASK_DATA_GENERATOR_MAPPING[task](config) for task in self.tasks
+        }
 
         self.batch_size = config.getint("EVALUATION", "batch_size", fallback=32)
 
-        self.save_eval_checkpoints = config.getboolean("EVALUATION", "save_eval_checkpoints",
-                                                       fallback=False)
+        self.save_eval_checkpoints = config.getboolean(
+            "EVALUATION",
+            "save_eval_checkpoints",
+            fallback=False
+        )
+
         if self.save_eval_checkpoints:
             # possibly keep track of previous runs of the evaluator for checkpoint purposes
             self.eval_run_tracker = defaultdict(list)
 
-        self.save_latest_checkpoint = config.getboolean("EVALUATION", "save_latest_checkpoint",
-                                                        fallback=True)
+        self.save_latest_checkpoint = config.getboolean(
+            "EVALUATION",
+            "save_latest_checkpoint",
+            fallback=True
+        )
 
         self.use_wandb = config.getboolean('EXPERIMENT', 'use_wandb', fallback=True)
         
@@ -56,8 +62,13 @@ class Evaluator(object):
     ### Helper methods for computing evaluation metrics
 
     @staticmethod
-    def compute_accuracy(predictions, evaluation_dataloader):
-        """ Computes accuracy of predictions for the data of the evaluation_dataloader """
+    def compute_accuracy(
+        predictions: List[int],
+        evaluation_dataloader: NLUDataLoader
+    ) -> float:
+        """ 
+        Computes accuracy of predictions for the data of the evaluation_dataloader
+        """
         labels = []
         for data_batch in evaluation_dataloader:
             labels.extend(data_batch['label_ids'].tolist())
@@ -67,7 +78,7 @@ class Evaluator(object):
 
     ### Entry point to running evaluation
 
-    def run(self, learner, num_task_batches=0):
+    def run(self, learner: BaseLearner, num_task_batches: int = 0) -> None:
         """ 
         Runs evaluation of the passed in learner on the self.tasks evaluation tasks. 
         Loops over each of the evaluation tasks in self.tasks and for each task 
@@ -76,9 +87,9 @@ class Evaluator(object):
         of the tasks. 
 
         Args:
-            * learner (subclass of BaseLearner): learning procedure 
-            * num_task_batches (int): optional value of the current task batch number 
-                at which we are evaluating
+            * learner (subclass of BaseLearner): learning procedure that was used to train the model
+            * num_task_batches (int): optional value of the current task batch number at which
+                we are evaluating
         """
 
         logger.info("")
@@ -92,10 +103,12 @@ class Evaluator(object):
             logger.info(f"(Task {idx}) Running evaluation task: {task}")
 
             ## Setting up params for the given task
-            task_params = TASK_PARAMS[task]
-            dataset_generator = self.dataset_generators[task]
+            task_data_generator = self.task_data_generators[task]
 
-            if task_params['task_type'] == "classification": 
+            task_type = task_data_generator.task_type
+            n_labels = task_data_generator.n_labels
+
+            if task_type == "classification": 
                 compute_metric = self.compute_accuracy
                 metric_name = "acc"
                 metric_summary = 'max'
@@ -103,7 +116,7 @@ class Evaluator(object):
                 logger.exception(f"Invalid task type: {task_params['task_type']} for task: {task}")
                 raise Exception(f"Invalid task type: {task_params['task_type']} for task: {task}")
 
-            for subtask_idx, (support_batch, evaluation_dataset) in enumerate(dataset_generator):
+            for subtask_idx, (support_batch, evaluation_dataset) in enumerate(task_data_generator):
                 evaluation_lng = evaluation_dataset.language
                 logger.info(f"\t Evaluating on: {evaluation_lng}")
 
@@ -113,22 +126,18 @@ class Evaluator(object):
                 )
 
                 ### Running Finetuning
-                # Calling on run_finetuning returns a set of finetuned-parameters
-                finetune_adaptation_batch = None
-
-                if self.learner_method == "platipus":
-                    finetune_adaptation_batch = finetune_dataset.get_adaptation_batch()
                 inference_params = learner.run_finetuning(
                     support_batch, 
-                    adaptation_batch=finetune_adaptation_batch,
-                    **task_params
+                    task_type,
+                    n_labels,
                 )
 
                 ### Running Inference 
                 predictions, eval_loss = learner.run_inference(
-                                                    inference_dataloader=evaluation_dataloader,
-                                                    **inference_params,
-                                                    **task_params)
+                    evaluation_dataloader,
+                    task_type,
+                    **inference_params,
+                )
 
                 ### Logging out metrics
                 if self.use_wandb:
