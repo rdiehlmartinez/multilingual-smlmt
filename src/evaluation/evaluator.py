@@ -106,7 +106,7 @@ class Evaluator(object):
             task_data_generator = self.task_data_generators[task]
 
             task_type = task_data_generator.task_type
-            n_labels = task_data_generator.n_labels
+            num_classes = task_data_generator.num_classes
 
             if task_type == "classification": 
                 compute_metric = self.compute_accuracy
@@ -129,7 +129,7 @@ class Evaluator(object):
                 inference_params = learner.run_finetuning(
                     support_batch, 
                     task_type,
-                    n_labels,
+                    num_classes,
                 )
 
                 ### Running Inference 

@@ -8,11 +8,12 @@ from .metadataset import MASK_TOKEN_ID
 from ...utils.data import base_collate_fn
 
 # typing imports
-from typing import List, Tuple, TypeAlias, Any, Dict
+from typing import List, Tuple, Any, Dict
+from .metadataset import MetaDataset
 
-RawDataBatch = TypeAlias("DataBatch", Dict[int, List[List[int]]])
-ProcessedDataBatch = TypeAlias("ProcessedDataBatch", Dict[str, torch.Tensor])
-SupportQueryBatch = TypeAlias("SupportQueryBatch", Tuple[List[RawDataBatch], RawDataBatch])
+RawDataBatch = Dict[int, List[List[int]]]
+ProcessedDataBatch = Dict[str, torch.Tensor]
+SupportQueryBatch =  Tuple[List[RawDataBatch], RawDataBatch]
 
 class MetaCollator(object):
 
@@ -83,7 +84,7 @@ class MetaDataLoader(DataLoader):
     """
     def __init__(
         self,
-        dataset,
+        dataset: MetaDataset,
         return_standard_labels: bool = False,
         batch_size: int = 1,
         shuffle: bool = False,

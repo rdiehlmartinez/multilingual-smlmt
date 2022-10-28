@@ -7,8 +7,10 @@ from torch.utils.data import DataLoader
 from ...utils.data import base_collate_fn
 
 # import statements for type hints
-from typing import Dict, Union, Tuple, List
-from .nludataset import NLUDataset
+from typing import Dict, Union, Tuple, List, Any, TYPE_CHECKING
+
+if TYPE_CHECKING: 
+    from .nludataset import NLUDataset
 
 class NLUCollator(object):
     def __call__(
@@ -35,6 +37,6 @@ class NLUDataLoader(DataLoader):
     Minimal wrapper around DataLoader to override the default collate_fn to be 
     nlu_collate.
     """
-    def __init__(self, dataset: NLUDataset, **kwargs) -> None:
+    def __init__(self, dataset: "NLUDataset", **kwargs) -> None:
         nlu_collator = NLUCollator()
         super().__init__(dataset, collate_fn=nlu_collator, **kwargs)

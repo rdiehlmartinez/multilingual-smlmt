@@ -11,7 +11,7 @@ import os
 import torch.multiprocessing as mp
 
 from .models import XLMR
-from .metalearners import Platipus, MAML, BaselineLearner
+from .metalearners import MAML, BaselineLearner
 from .evaluation import Evaluator
 from .utils import device as DEFAULT_DEVICE, num_gpus
 from .datasets import MetaDataset, MetaDataLoader
@@ -131,6 +131,7 @@ class Problyglot(object):
         logger.info(f"Using learner: {learner_method}")
 
         learner_kwargs = dict(self.config.items("LEARNER"))
+        del learner_kwargs['method']
 
         if hasattr(self, "return_standard_labels") and self.return_standard_labels: 
             # The final classification layer of the learner is over the entire vocab,
@@ -182,7 +183,6 @@ class Problyglot(object):
             logger.info("No checkpoint used - learning from scratch")
 
         return learner
-
 
     def shutdown_processes(self) -> None:
         """Helper function for shutting down any spawned processes """
@@ -261,12 +261,21 @@ class Problyglot(object):
 
         ### reading in training configs
 
-        num_tasks_per_iteration = self.config.getint("PROBLYGLOT", "num_tasks_per_iteration",
-                                                     fallback=1)
-        eval_every_n_iteration = self.config.getint("PROBLYGLOT", "eval_every_n_iteration",
-                                                    fallback=0)
-        max_task_batch_steps = self.config.getint("PROBLYGLOT", "max_task_batch_steps",
-                                                  fallback=1)
+        num_tasks_per_iteration = self.config.getint(
+            "PROBLYGLOT",
+            "num_tasks_per_iteration",
+            fallback=1
+        )
+        eval_every_n_iteration = self.config.getint(
+            "PROBLYGLOT",
+            "eval_every_n_iteration",
+            fallback=0
+        )
+        max_task_batch_steps = self.config.getint(
+            "PROBLYGLOT",
+            "max_task_batch_steps",
+            fallback=1
+        )
 
         ### If using n GPUs we launch n processes that run the run_inner_loop_mp function 
 
@@ -288,15 +297,17 @@ class Problyglot(object):
 
             self.gpu_workers = []
             for rank in range(num_gpus):
-                p = spawn_context.Process(target=self.learner.run_inner_loop_mp,
-                                          args=(rank,
-                                                num_gpus,
-                                                data_queue,
-                                                loss_queue,
-                                                step_optimizer, 
-                                                num_tasks_per_iteration,
-                                               )
-                                          )
+                p = spawn_context.Process(
+                    target=self.learner.run_inner_loop_mp,
+                    args=(
+                        rank,
+                        num_gpus,
+                        data_queue,
+                        loss_queue,
+                        step_optimizer, 
+                        num_tasks_per_iteration,
+                    )   
+                )
                 p.start()
                 self.gpu_workers.append(p)
 

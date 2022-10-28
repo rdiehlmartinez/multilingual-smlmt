@@ -9,20 +9,17 @@ import os
 import re 
 
 from collections import OrderedDict
-from typing import Union
 
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from ..taskheads import TaskHead, ClassificationHead
-
 from ..utils import set_seed
 
 # imports for typing 
 from ..models import BaseModel
-from typing import Tuple, List, Dict, Union
-from collections.abc import Iterator
+from typing import Tuple, List, Dict, Union, Any, Iterator
 from multiprocessing import Queue, Event
 
 logger = logging.getLogger(__name__)
@@ -129,8 +126,11 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         init_kwargs = {}
 
-        init_kwargs['base_model_hidden_dim'] = self.base_model_hidden_dim
+        init_kwargs['task_type'] = task_type  
+        init_kwargs['task_init_method'] = task_init_method
         init_kwargs['n_labels'] = n_labels
+
+        init_kwargs['base_model_hidden_dim'] = self.base_model_hidden_dim
         init_kwargs['device'] = device if device is not None else self.base_device 
 
         if 'protomaml' in task_init_method:
@@ -213,11 +213,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         """
         return learner.run_inner_loop(support_batch, query_batch, device)
 
-    def setup_DDP(
-        self,
-        rank: int,
-        world_size: int
-    ) -> Tuple[torch.device, torch.nn.parallel.DistributedDataParallel]:
+    def setup_DDP(self, rank: int, world_size: int) -> Tuple[torch.device, DDP]:
         """ 
         Helper method for setting up distributed data parallel process group and returning 
         a wrapper DDP instance of the learner
@@ -228,7 +224,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         Returns:
             * device (int): Device to run model on
-            * ddp (torch.DistributedDataParallel): Wrapped DDP learner
+            * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
         """
         device = torch.device(f"cuda:{rank}")
         os.environ['MASTER_ADDR'] = 'localhost'
@@ -241,7 +237,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         ddp = DDP(self, device_ids=[rank], find_unused_parameters=True)
         return (device, ddp)
 
-   def run_inner_loop_mp(
+    def run_inner_loop_mp(
         self,
         rank: int,
         world_size: int,
@@ -516,14 +512,14 @@ class MetaBaseLearner(BaseLearner):
         
         return updated_state_dict
 
-    def setup_DDP( self, **kwargs) -> Tuple[torch.device, torch.DistributedDataParallel]:
+    def setup_DDP(self, **kwargs) -> Tuple[torch.device, DDP]:
         """ 
         Overriding parent behavior to ensure that the functionalized model is also wrapped in
         DDP.
 
         Returns:
             * device (int): Device to run model on
-            * ddp (torch.DistributedDataParallel): Wrapped DDP learner
+            * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
         """
         device, ddp = super().setup_DDP(**kwargs)
         self.functionalize_model()

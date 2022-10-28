@@ -18,6 +18,7 @@ tokenizer = XLMRobertaTokenizer.from_pretrained('xlm-roberta-base')
 
 # imports for type hints
 from configparser import ConfigParser
+from typing import Dict, List, Tuple
 
 # to stop the huggingface tokenizer from giving the sequence longer than 512 warning 
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -126,7 +127,6 @@ class XNLIDataGenerator(NLUTaskDataGenerator):
             support_batch = XNLIDataset(
                 lng=language_file_dict['finetune']['lng'],
                 file_path=language_file_dict['finetune']['file_path'],
-                language_task_kwargs=self.language_task_kwargs,
                 translated=is_translated,
             ).generate_N_K_samples(
                 N=self.num_classes,
@@ -136,7 +136,6 @@ class XNLIDataGenerator(NLUTaskDataGenerator):
             evaluation_dataset = XNLIDataset(
                 lng=language_file_dict['evaluation']['lng'],
                 file_path=language_file_dict['evaluation']['file_path'],
-                language_task_kwargs=self.language_task_kwargs,
                 translated=False,
             )
 

@@ -7,7 +7,7 @@ import logging
 from collections import defaultdict
 
 # typing import 
-from typing import Dict
+from typing import Dict, Any
 from collections.abc import Callable
 import torch.nn as nn
 
@@ -61,17 +61,17 @@ class TaskHead(object, metaclass=abc.ABCMeta):
     def initialize_task_head(
         cls,
         task_type: str,
-        method: str,
+        task_init_method: str,
         **init_kwargs: Dict[str, Any],
     ) -> nn.ParameterDict:
         """
         Method for initializing the weights of a task head. Reads in two strings, task_type and
-        method which jointly specify the task head and type of initialization method to use. 
+        task_init_method which jointly specify the task head and type of initialization method to use. 
         Then calls on the corresponding function and forwards the **init_kwargs keyword arguments. 
         
         Args: 
             * task_type: Type of task head (e.g. 'classification')
-            * method: Method to use for initializing the weights of the task head 
+            * task_init_method: Method to use for initializing the weights of the task head 
                 (e.g. 'random')
             * init_kwargs (dict): Keyword arguments used by the initialization function 
         Returns: 
@@ -81,7 +81,7 @@ class TaskHead(object, metaclass=abc.ABCMeta):
         """
 
         try: 
-            initialization_function = cls._task_head_initializers[task_type][method]
+            initialization_function = cls._task_head_initializers[task_type][task_init_method]
         except KeyError:
             logger.exception("Could not initialize task head; invalid task type or method")
             raise Exception("Could not initialize task head; invalid task type or method")

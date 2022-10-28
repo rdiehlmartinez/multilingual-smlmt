@@ -11,8 +11,7 @@ import torch.nn.functional as F
 from .base import TaskHead
 
 # typing imports 
-from typing import Tuple, Union, List
-from higher import MonkeyPatched
+from typing import Tuple, Union, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +134,7 @@ def classification_random_fc(
 def classification_protomaml(
     base_model_hidden_dim: int,
     n_labels: int,
-    model: Union[nn.Module, MonkeyPatched],
+    model: nn.Module,
     data_batch: Dict[str, torch.Tensor],
     device: torch.device,
     params: List[torch.Tensor] = None
@@ -146,8 +145,7 @@ def classification_protomaml(
     Args: 
         * base_model_hidden_dim: The hidden dimensions of the outputs of the base_model 
         * n_labels: Number of labels (classes) to classify over 
-        * model (higher.MonkeyPatched or nn.Module): Either the model or the 'functionalized'
-            version of the base model
+        * model (nn.Module): Either the model or the 'functionalized' version of the base model
         * data_batch: Batch of data for a forward pass through the model 
             (see run_inner_loop for information on the data structure).
         * device: Device type ('cuda' or 'cpu')

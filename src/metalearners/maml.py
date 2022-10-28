@@ -4,11 +4,8 @@ Implements Model Agnostic Meta Learning: https://arxiv.org/abs/1703.03400
 """
 
 import time
-import higher 
 import itertools
 import logging
-
-from multiprocessing.queues import Empty as EmptyQueue
 
 import torch
 import torch.distributed as dist
@@ -18,8 +15,7 @@ from ..taskheads import TaskHead
 from ..utils import move_to_device
 
 # typing imports 
-from typing import Dict, Tuple, List, Dict
-from collections.abc import Iterator
+from typing import Dict, Tuple, List, Dict, Iterator, Any
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +67,7 @@ class MAML(MetaBaseLearner):
         task_type: str,
         task_init_method: str,
         n_labels: int, 
-        **kwargs
+        **kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
         """ 
         Override base implementation of this method to replace the model with the functional 
@@ -81,6 +77,7 @@ class MAML(MetaBaseLearner):
             * task_type: Type of task head to initialize
             * task_init_method: Method for initializing the task head
             * n_labels: Number of labels defined by the task (i.e. classes)
+            * kwargs: Additional arguments to pass to the task head initialization method
         Returns:
             * init_kwargs: Keyword arguments used by the initialization function 
         """
@@ -154,7 +151,7 @@ class MAML(MetaBaseLearner):
                 device=device
             )
 
-            lm_head = TaskHead.initialize_task_head(init_kwargs)
+            lm_head = TaskHead.initialize_task_head(**init_kwargs)
             
             if 'protomaml' in self.lm_head_init_method and self.use_multiple_samples:
                 # If we're using protomaml, the first batch is used for sampling the task head 
@@ -235,7 +232,7 @@ class MAML(MetaBaseLearner):
             n_labels,
             data_batch=support_batch if 'protomaml' in self.lm_head_init_method else None,
         )
-        task_head_weights = TaskHead.initialize_task_head(init_kwargs)
+        task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
 
         # detaching parameters from original computation graph to create new leaf variables
         finetuned_model_params = []
@@ -271,9 +268,9 @@ class MAML(MetaBaseLearner):
 
 
     def run_inference(self,
-        inference_dataloader: torch.utils.data.Dataloader,
+        inference_dataloader: torch.utils.data.DataLoader,
         task_type: str,
-        finetuned_params: List[nn.Parameter],
+        finetuned_params: List[torch.nn.Parameter],
         task_head_weights: Dict[str, torch.Tensor],
     ) -> Tuple[List[int], int]:
         """ 

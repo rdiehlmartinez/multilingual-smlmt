@@ -10,7 +10,9 @@ from torch.utils.data import IterableDataset
 from .nludataloader import NLUCollator
 
 # import statements for type hints 
+import torch
 from configparser import ConfigParser
+from typing import Tuple, List, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +54,7 @@ class NLUDataset(IterableDataset, metaclass=abc.ABCMeta):
     used in conjugtion with the NLUDataLoader.
     """
 
-    def __init__(
-        self,
-        lng: str,
-        file_path: str,
-    ) -> None: 
+    def __init__(self, lng: str, file_path: str) -> None: 
         """
         For a given language string and data filepath, establishes an IterableDataset that 
         iterates over and processes the NLU data for that language. The language_task_kwargs
@@ -110,7 +108,7 @@ class NLUDataset(IterableDataset, metaclass=abc.ABCMeta):
             for line in f: 
                 label_id, input_ids = self.preprocess_line(line)
 
-                if len(support_set[label_id]) < self.K:
+                if len(support_set[label_id]) < K:
                     support_set[label_id].append(input_ids)
 
                 if len(support_set) == N * K:

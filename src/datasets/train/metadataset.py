@@ -19,7 +19,7 @@ from collections import defaultdict
 
 # typing imports 
 from configparser import ConfigParser
-from typing import List, Tuple, Dict 
+from typing import List, Tuple, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -35,155 +35,6 @@ SPECIAL_TOKEN_IDS = tokenizer.all_special_ids
 BYTE_ENCODING_SIZE = math.ceil(math.log(tokenizer.vocab_size + 1, 16)) 
 BYTE_ENDIAN_MODE = 'big'
 BYTE_END_MARKER = tokenizer.vocab_size.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE)
-
-class MetaDataset(IterableDataset):
-    """
-    MetaDataset that coordinates the generation of (masked language) tasks. For the 
-    foreseeable future MetaDataset only supports generation of masked language tasks,
-    but it can fairly trivially be adapted to also produce generation of NLU tasks. 
-    """
-
-    def __init__(self, config: ConfigParser) -> None:
-        """ 
-        Initialize MetaDataset using a config file. MetaDataset is the method used for 
-        pre-training the meta-learning model.
-        """
-        logger.info(f"Initializing MetaDataset")
-
-        languages = self._get_languages(config)
-        self.datasets, self.datasets_md = self._initialize_datasets(config, languages)
-
-        self.task_sampling_method = config.get(
-            "META_DATASET",
-            "task_sampling_method",
-            fallback="random"
-        )
-        
-        if self.task_sampling_method == 'proportional':
-            self.task_sampling_prop_rate = config.getfloat(
-                "META_DATASET",
-                "task_sampling_prop_rate",
-                fallback=0.5
-            )
-        
-        super().__init__()
-
-    @staticmethod
-    def _get_languages(config: ConfigParser) -> List[str]: 
-        """
-        Helper for reading in languages from config or from a file.
-
-        Args:
-            * config: parsed config file passed from __init__
-        
-        Returns: 
-            * languages: list of languages stored as iso-codes
-        """    
-        # languages_str can either be empty string, a file path or a 
-        # comma-separated list of iso language codes 
-        languages_str = config.get("META_DATASET", f"languages")
-        if ".txt" in languages_str: 
-            with open(languages_str, "r") as f: 
-                languages = f.read().splitlines()
-        else: 
-            languages = languages_str.split(",")
-    
-        return languages
-
-    def _initialize_datasets(self,
-        config: ConfigParser,
-        languages: List[str]
-    ) -> Tuple[Dict[str, IterableLanguageTaskDataset], Dict[str, Any]]:
-        """ 
-        Helper method for setting up datasets 
-        Args: 
-            * config: parsed config file passed from __init__ 
-            * languagess: list of languages stored as iso-codes 
-        Returns:
-            * datasets: Returns a dictionary mapping a specific language to the associated dataset
-                for that language 
-            * datasets_md: Returns a dictionary mapping a specific language to metadata associated
-                with the dataset for that language
-        """
-
-        def compute_dataset_size(lng_root_fp: str) -> int: 
-            """ Calculate the size of a directory in bytes"""
-            size = 0 
-            for filename in os.listdir(lng_root_fp):
-                filepath = os.path.join(lng_root_fp, filename)
-                size += os.stat(filepath).st_size
-            return size
-
-        data_root = config.get("META_DATASET", "root_path")
-        datasets = {}
-        datasets_md = {}
-
-        # passing seed to reproduce the same data by IterableLanguageTaskDataset
-        seed = config.getint("EXPERIMENT", "seed", fallback=-1)
-
-        for language in languages: 
-            lng_root_fp = os.path.join(data_root, language)
-
-            dataset_size = compute_dataset_size(lng_root_fp)
-
-            language_task_kwargs = dict(config.items('LANGUAGE_TASK'))
-            if config.getboolean("LEARNER", "use_multiple_samples", fallback=True):
-                language_task_kwargs['num_task_samples'] = \
-                    config.getint("LEARNER", "num_learning_steps")
-
-            dataset = IterableLanguageTaskDataset(
-                lng_root_fp,
-                language,
-                seed=seed,
-                **language_task_kwargs
-            )
-            
-            datasets[language] = dataset
-            datasets_md[language] = {"dataset_size": dataset_size} # Can add more metadata 
-
-        return datasets, datasets_md 
-
-    def shutdown(self) -> None:
-        """ 
-        Shuts down worker nodes spawned by each of the datsets 
-        """
-        logger.info("Shutting down worker nodes for data processing")
-        for _, dataset in self.datasets.items(): 
-            dataset.shutdown()
-        
-        # to play nicely with wandb
-        time.sleep(1)
-
-    def __next__(self) -> Tuple[str, IterableLanguageTaskDataset]
-        """
-        Called by MetaDataLoader to iterate over the dataset. First samples a language 
-        (aka. a task) from which to sample a support and query set. 
-
-        Returns: 
-            * Tuple containing: 
-                * sampled language (str): language of sample
-                * Another tuple storing the data for the support and query sets which
-                is returned from calling next on the IterableLanguageTaskDataset dataset.
-        """
-        # sample next task either randomly or proportional to size of dataset
-        if self.task_sampling_method == 'random':
-            sampled_language = random.sample(self.datasets_md.keys(), k=1)[0]
-        elif self.task_sampling_method == 'proportional':
-            sampling_weights = [ v['dataset_size']**self.task_sampling_prop_rate 
-                                    for v in self.datasets_md.values()]
-            sampling_weights = sampling_weights/np.sum(sampling_weights)
-            sampled_language = random.choices(list(self.datasets_md.keys()),
-                                              weights=sampling_weights, k=1)[0]
-        else: 
-            logger.exception(f"Invalid task sampling method: {self.task_sampling_method}")
-            raise Exception(f"Invalid task sampling method: {self.task_sampling_method}")
-        
-        sampled_dataset = self.datasets[sampled_language]
-        return (sampled_language, next(sampled_dataset))
-        
-    def __iter__(self):
-        """ IterableDataset expects __iter__ to be implemented"""
-        return self
 
 class IterableLanguageTaskDataset(object): 
     ''' 
@@ -679,3 +530,153 @@ class IterableLanguageTaskDataset(object):
                 curr_subword_to_sample = defaultdict(list)
                 
                 self.release_and_wait()
+
+class MetaDataset(IterableDataset):
+    """
+    MetaDataset that coordinates the generation of (masked language) tasks. For the 
+    foreseeable future MetaDataset only supports generation of masked language tasks,
+    but it can fairly trivially be adapted to also produce generation of NLU tasks. 
+    """
+
+    def __init__(self, config: ConfigParser) -> None:
+        """ 
+        Initialize MetaDataset using a config file. MetaDataset is the method used for 
+        pre-training the meta-learning model.
+        """
+        logger.info(f"Initializing MetaDataset")
+
+        languages = self._get_languages(config)
+        self.datasets, self.datasets_md = self._initialize_datasets(config, languages)
+
+        self.task_sampling_method = config.get(
+            "META_DATASET",
+            "task_sampling_method",
+            fallback="random"
+        )
+        
+        if self.task_sampling_method == 'proportional':
+            self.task_sampling_prop_rate = config.getfloat(
+                "META_DATASET",
+                "task_sampling_prop_rate",
+                fallback=0.5
+            )
+        
+        super().__init__()
+
+    @staticmethod
+    def _get_languages(config: ConfigParser) -> List[str]: 
+        """
+        Helper for reading in languages from config or from a file.
+
+        Args:
+            * config: parsed config file passed from __init__
+        
+        Returns: 
+            * languages: list of languages stored as iso-codes
+        """    
+        # languages_str can either be empty string, a file path or a 
+        # comma-separated list of iso language codes 
+        languages_str = config.get("META_DATASET", f"languages")
+        if ".txt" in languages_str: 
+            with open(languages_str, "r") as f: 
+                languages = f.read().splitlines()
+        else: 
+            languages = languages_str.split(",")
+    
+        return languages
+
+    def _initialize_datasets(self,
+        config: ConfigParser,
+        languages: List[str]
+    ) -> Tuple[Dict[str, IterableLanguageTaskDataset], Dict[str, Any]]:
+        """ 
+        Helper method for setting up datasets 
+        Args: 
+            * config: parsed config file passed from __init__ 
+            * languagess: list of languages stored as iso-codes 
+        Returns:
+            * datasets: Returns a dictionary mapping a specific language to the associated dataset
+                for that language 
+            * datasets_md: Returns a dictionary mapping a specific language to metadata associated
+                with the dataset for that language
+        """
+
+        def compute_dataset_size(lng_root_fp: str) -> int: 
+            """ Calculate the size of a directory in bytes"""
+            size = 0 
+            for filename in os.listdir(lng_root_fp):
+                filepath = os.path.join(lng_root_fp, filename)
+                size += os.stat(filepath).st_size
+            return size
+
+        data_root = config.get("META_DATASET", "root_path")
+        datasets = {}
+        datasets_md = {}
+
+        # passing seed to reproduce the same data by IterableLanguageTaskDataset
+        seed = config.getint("EXPERIMENT", "seed", fallback=-1)
+
+        for language in languages: 
+            lng_root_fp = os.path.join(data_root, language)
+
+            dataset_size = compute_dataset_size(lng_root_fp)
+
+            language_task_kwargs = dict(config.items('LANGUAGE_TASK'))
+            if config.getboolean("LEARNER", "use_multiple_samples", fallback=True):
+                language_task_kwargs['num_task_samples'] = \
+                    config.getint("LEARNER", "num_learning_steps")
+
+            dataset = IterableLanguageTaskDataset(
+                lng_root_fp,
+                language,
+                seed=seed,
+                **language_task_kwargs
+            )
+            
+            datasets[language] = dataset
+            datasets_md[language] = {"dataset_size": dataset_size} # Can add more metadata 
+
+        return datasets, datasets_md 
+
+    def shutdown(self) -> None:
+        """ 
+        Shuts down worker nodes spawned by each of the datsets 
+        """
+        logger.info("Shutting down worker nodes for data processing")
+        for _, dataset in self.datasets.items(): 
+            dataset.shutdown()
+        
+        # to play nicely with wandb
+        time.sleep(1)
+
+    def __next__(self) -> Tuple[str, IterableLanguageTaskDataset]:
+        """
+        Called by MetaDataLoader to iterate over the dataset. First samples a language 
+        (aka. a task) from which to sample a support and query set. 
+
+        Returns: 
+            * Tuple containing: 
+                * sampled language (str): language of sample
+                * Another tuple storing the data for the support and query sets which
+                    is returned from calling next on the IterableLanguageTaskDataset dataset.
+        """
+        # sample next task either randomly or proportional to size of dataset
+        if self.task_sampling_method == 'random':
+            sampled_language = random.sample(self.datasets_md.keys(), k=1)[0]
+        elif self.task_sampling_method == 'proportional':
+            sampling_weights = [ v['dataset_size']**self.task_sampling_prop_rate 
+                                    for v in self.datasets_md.values()]
+            sampling_weights = sampling_weights/np.sum(sampling_weights)
+            sampled_language = random.choices(list(self.datasets_md.keys()),
+                                              weights=sampling_weights, k=1)[0]
+        else: 
+            logger.exception(f"Invalid task sampling method: {self.task_sampling_method}")
+            raise Exception(f"Invalid task sampling method: {self.task_sampling_method}")
+        
+        sampled_dataset = self.datasets[sampled_language]
+        return (sampled_language, next(sampled_dataset))
+        
+    def __iter__(self):
+        """ IterableDataset expects __iter__ to be implemented"""
+        return self
+
