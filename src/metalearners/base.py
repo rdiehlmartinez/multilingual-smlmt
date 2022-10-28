@@ -7,7 +7,9 @@ import logging
 import math
 import os
 import re 
+import time
 
+from multiprocessing.queues import Empty as EmptyQueue
 from collections import OrderedDict
 
 import torch
@@ -512,16 +514,16 @@ class MetaBaseLearner(BaseLearner):
         
         return updated_state_dict
 
-    def setup_DDP(self, **kwargs) -> Tuple[torch.device, DDP]:
+    def setup_DDP(self, *args) -> Tuple[torch.device, DDP]:
         """ 
-        Overriding parent behavior to ensure that the functionalized model is also wrapped in
-        DDP.
+        Overriding parent behavior to ensure that the model is functionalized whenever we run 
+        the model in a distributed setting.
 
         Returns:
             * device (int): Device to run model on
             * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
         """
-        device, ddp = super().setup_DDP(**kwargs)
+        device, ddp = super().setup_DDP(*args)
         self.functionalize_model()
         return (device, ddp)
 
