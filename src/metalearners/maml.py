@@ -101,7 +101,6 @@ class MAML(MetaBaseLearner):
         support_batch_list: List[Dict[str, torch.Tensor]],
         query_batch: Dict[str, torch.Tensor],
         device: torch.device = None, 
-        **kwargs
     ) -> torch.Tensor: 
         """
         Implements the inner loop of the MAML process - clones the parameters of the model 

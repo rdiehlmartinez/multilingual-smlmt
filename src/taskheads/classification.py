@@ -61,7 +61,6 @@ def classification_random(
     base_model_hidden_dim: int,
     n_labels: int,
     device: str,
-    **kwargs,
 ) -> nn.ParameterDict:
     """
     Initializes classification task head using a random Xavier-He initialization method.
@@ -99,7 +98,7 @@ def classification_random(
 def classification_random_fc(
     base_model_hidden_dim: int,
     n_labels: int,
-    **kwargs
+    **kwargs: Dict[str, Any]
 ) -> nn.ParameterDict:
     """
     Initializes classification task head using a random Xavier-He initialization method. 
@@ -138,9 +137,8 @@ def classification_protomaml(
     n_labels: int,
     model: Union[nn.Module, MonkeyPatched],
     data_batch: Dict[str, torch.Tensor],
-    device: str,
-    params: List[torch.Tensor] = None,
-    **kwargs,
+    device: torch.device,
+    params: List[torch.Tensor] = None
 ) -> nn.ParameterDict:
     """
     Initializes task head using the protomaml (prototypical network + MAML) method. 

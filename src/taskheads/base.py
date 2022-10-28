@@ -7,6 +7,7 @@ import logging
 from collections import defaultdict
 
 # typing import 
+from typing import Dict
 from collections.abc import Callable
 import torch.nn as nn
 
@@ -61,7 +62,7 @@ class TaskHead(object, metaclass=abc.ABCMeta):
         cls,
         task_type: str,
         method: str,
-        **init_kwargs: dict,
+        **init_kwargs: Dict[str, Any],
     ) -> nn.ParameterDict:
         """
         Method for initializing the weights of a task head. Reads in two strings, task_type and

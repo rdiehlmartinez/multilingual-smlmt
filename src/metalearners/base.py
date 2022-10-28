@@ -38,7 +38,6 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         lm_head_n: Union[int, str] = 100,
         retain_lm_head: Union[bool, str] = False,
         use_multiple_samples: Union[bool, str] = True,
-        **kwargs
     ) -> None:
         """
         BaseLearner establishes the inferface for the learner class.
@@ -305,8 +304,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         support_batch_list: List[Dict[str, torch.Tensor]],
         query_batch: Dict[str, torch.Tensor],
         device: torch.device = None, 
-        **kwargs
-    ): 
+    ) -> torch.Tensor:
         """ 
         Run an inner loop optimization step (in the context of meta learning); assumes 
         that the class contains the model that is to-be meta-learned.

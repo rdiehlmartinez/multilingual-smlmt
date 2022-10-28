@@ -5,7 +5,10 @@ import torch
 
 from typing import Dict, Union, List, Tuple
 
-def move_to_device(batch: dict, device: torch.device) -> Dict[str, torch.Tensor]:
+def move_to_device(
+    batch: Dict[str, torch.Tensor],
+    device: torch.device
+) -> Dict[str, torch.Tensor]:
     """ 
     Helper functionality for moving a batch of data that is structured as a dictionary (possibly
     nested) onto a certain device.
