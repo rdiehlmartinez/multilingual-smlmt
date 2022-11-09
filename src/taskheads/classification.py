@@ -182,9 +182,9 @@ def classification_protomaml(
     classifier_weight = 2 * prototypes
     classifier_bias = -torch.norm(prototypes, dim=1)**2
 
-    task_head_weights = nn.ParameterDict({
-        "classifier_weight": nn.Parameter(classifier_weight),
-        "classifier_bias": nn.Parameter(classifier_bias)
-    })
+    task_head_weights = {
+        "classifier_weight": classifier_weight,
+        "classifier_bias": classifier_bias 
+    }
 
     return task_head_weights

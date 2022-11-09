@@ -2,7 +2,8 @@ __author__ = 'Richard Diehl Martinez'
 """ Interface class for (meta) learners """
 
 import abc 
-import higher
+# custom higher
+import lib.higher.higher as higher
 import logging
 import math
 import os
@@ -37,6 +38,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         lm_head_n: Union[int, str] = 100,
         retain_lm_head: Union[bool, str] = False,
         use_multiple_samples: Union[bool, str] = True,
+        **kwargs
     ) -> None:
         """
         BaseLearner establishes the inferface for the learner class.
@@ -57,13 +59,12 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         """
         super().__init__()
         self.seed = seed
+        self.base_device = base_device
 
         # hidden dimensions of the outputs of the base_model
         self.base_model = base_model
-        self.base_model.to(base_device)
+        self.base_model.to(self.base_device)
         self.base_model_hidden_dim = base_model.hidden_dim 
-
-        self.base_device = base_device
 
         self.lm_head_init_method = lm_head_init_method
         self.lm_head_n = int(lm_head_n)
@@ -82,12 +83,12 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 self.lm_head_init_method,
                 self.lm_head_n,
             )
-            self.retained_lm_head = TaskHead.initialize_task_head(**init_kwargs)
+            self.retained_lm_head_weights = TaskHead.initialize_task_head(**init_kwargs)
 
         else: 
             # If we are re-initializing the LM head for each training task, then we should use 
-            # protomaml (but it is still possible to use a random initialization)
-            if lm_head_init_method != "protomaml": 
+            # protomaml
+            if "protomaml" not in self.lm_head_init_method:
                 logger.warning("LM head will be reinitialized without protomaml (NOT RECOMMENDED)")
 
         logger.info(f"LM head retaining set to: {self.retain_lm_head}")
@@ -188,113 +189,123 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         return (logits, loss)
 
+    @property
+    @abc.abstractmethod
+    def outerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
+        """
+        Returns the parameter groups that are learnable during the outer loop. Note that 
+        we might not have any inner loop parameters that need to be optimized (baseline model),
+        thus only this method needs to be implemented.
+        """
+        raise NotImplementedError
+
     ###### Model training methods ######
 
-    def optimizer_step(self, set_zero_grad: bool = False) -> None:
-        """ 
-        Take a global update step of the meta learner params; optionally set the gradients of the 
-        meta learner gradient tape back to zero.
+    # def optimizer_step(self, set_zero_grad: bool = False) -> None:
+    #     """ 
+    #     Take a global update step of the meta learner params; optionally set the gradients of the 
+    #     meta learner gradient tape back to zero.
 
-        Args:
-            * set_zero_grad (bool): Whether to set the gradients of the meta learner gradient tape
-                back to zero after the optimizer step. Defaults to False.
+    #     Args:
+    #         * set_zero_grad (bool): Whether to set the gradients of the meta learner gradient tape
+    #             back to zero after the optimizer step. Defaults to False.
 
-        """
-        assert(hasattr(self, 'optimizer')),\
-            "Learner cannot take optimizer step - needs to define an optimizer attribute"
+    #     """
+    #     assert(hasattr(self, 'optimizer')),\
+    #         "Learner cannot take optimizer step - needs to define an optimizer attribute"
 
-        self.optimizer.step()
-        if set_zero_grad:
-            self.optimizer.zero_grad()
+    #     self.optimizer.step()
+    #     if set_zero_grad:
+    #         self.optimizer.zero_grad()
     
-    def forward(self, learner, support_batch, query_batch, device):
-        """ 
-        NOTE: Only the DistributedDataParallel version of this model should indirectly call this.
-              Used as a wrapper to run_inner_loop. 
-              Unless you know what you're doing, don't call this method.
-        """
-        return learner.run_inner_loop(support_batch, query_batch, device)
+    # def forward(self, learner, support_batch, query_batch, device):
+    #     """ 
+    #     NOTE: Only the DistributedDataParallel version of this model should indirectly call this.
+    #           Used as a wrapper to run_inner_loop. 
+    #           Unless you know what you're doing, don't call this method.
+    #     """
+    #     return learner.run_inner_loop(support_batch, query_batch, device)
 
-    def setup_DDP(self, rank: int, world_size: int) -> Tuple[torch.device, DDP]:
-        """ 
-        Helper method for setting up distributed data parallel process group and returning 
-        a wrapper DDP instance of the learner
+    # def setup_DDP(self, rank: int, world_size: int) -> Tuple[torch.device, DDP]:
+    #     """ 
+    #     Helper method for setting up distributed data parallel process group and returning 
+    #     a wrapper DDP instance of the learner
         
-        Args: 
-            * rank (int): Rank of current GPU 
-            * world_size (int): Number of GPUs should be the same as utils.num_gpus
+    #     Args: 
+    #         * rank (int): Rank of current GPU 
+    #         * world_size (int): Number of GPUs should be the same as utils.num_gpus
 
-        Returns:
-            * device (int): Device to run model on
-            * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
-        """
-        device = torch.device(f"cuda:{rank}")
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '32432'
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        set_seed(self.seed)
+    #     Returns:
+    #         * device (int): Device to run model on
+    #         * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
+    #     """
+    #     device = torch.device(f"cuda:{rank}")
+    #     os.environ['MASTER_ADDR'] = 'localhost'
+    #     os.environ['MASTER_PORT'] = '32432'
+    #     dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    #     set_seed(self.seed)
 
-        self.to(device)
+    #     self.to(device)
 
-        ddp = DDP(self, device_ids=[rank], find_unused_parameters=True)
-        return (device, ddp)
+    #     ddp = DDP(self, device_ids=[rank], find_unused_parameters=True)
+    #     return (device, ddp)
 
-    def run_inner_loop_mp(
-        self,
-        rank: int,
-        world_size: int,
-        data_queue: Queue,
-        loss_queue: Queue,
-        step_optimizer: Event, 
-        num_tasks_per_iteration: int,
-    ) -> None:
-        """
-        Entry point for running inner loop using multiple processes. Sets up DDP init process
-        group, wraps learner in DDP and calls forward/backward on the DDP-wrapped model.
+    # def run_inner_loop_mp(
+    #     self,
+    #     rank: int,
+    #     world_size: int,
+    #     data_queue: Queue,
+    #     loss_queue: Queue,
+    #     step_optimizer: Event, 
+    #     num_tasks_per_iteration: int,
+    # ) -> None:
+    #     """
+    #     Entry point for running inner loop using multiple processes. Sets up DDP init process
+    #     group, wraps learner in DDP and calls forward/backward on the DDP-wrapped model.
 
-        Args: 
-            * rank (int): Rank of current GPU 
-            * world_size (int): Number of GPUs should be the same as utils.num_gpus
-            * data_queue (multiprocessing.Queue): Queue from which we read passed in data
-            * loss_queue (multiprocessing.Queue): Queue to which we write loss values
-            * step_optimizer (multiprocessing.Event): Event to signal workers to take an optimizer
-                step
-            * num_tasks_per_iteration (int): Number of tasks per iteration that the user specifies
-                in the experiment config file
-        """
+    #     Args: 
+    #         * rank (int): Rank of current GPU 
+    #         * world_size (int): Number of GPUs should be the same as utils.num_gpus
+    #         * data_queue (multiprocessing.Queue): Queue from which we read passed in data
+    #         * loss_queue (multiprocessing.Queue): Queue to which we write loss values
+    #         * step_optimizer (multiprocessing.Event): Event to signal workers to take an optimizer
+    #             step
+    #         * num_tasks_per_iteration (int): Number of tasks per iteration that the user specifies
+    #             in the experiment config file
+    #     """
 
-        device, ddp = self.setup_DDP(rank, world_size)
+    #     device, ddp = self.setup_DDP(rank, world_size)
 
-        while True: 
-            # The main process sends signal to update optimizers
+    #     while True: 
+    #         # The main process sends signal to update optimizers
 
-            while True: 
-                # Waiting for the next batch of data 
-                # NOTE: If there is no data either 1) the dataloading pipeline is taking a while 
-                # or 2) the main process is waiting for all the workers to finish 
-                try:
-                    batch = data_queue.get(block=False)[0]
-                    break
-                except EmptyQueue: 
-                    pass
+    #         while True: 
+    #             # Waiting for the next batch of data 
+    #             # NOTE: If there is no data either 1) the dataloading pipeline is taking a while 
+    #             # or 2) the main process is waiting for all the workers to finish 
+    #             try:
+    #                 batch = data_queue.get(block=False)[0]
+    #                 break
+    #             except EmptyQueue: 
+    #                 pass
 
-                if step_optimizer.is_set():
-                    # make sure all workers have taken an optimizer step
-                    self.optimizer_step(set_zero_grad=True)
-                    dist.barrier()
+    #             if step_optimizer.is_set():
+    #                 # make sure all workers have taken an optimizer step
+    #                 self.optimizer_step(set_zero_grad=True)
+    #                 dist.barrier()
 
-                    # once all workers have update params clear the flag to continue training
-                    step_optimizer.clear()
+    #                 # once all workers have update params clear the flag to continue training
+    #                 step_optimizer.clear()
 
-                time.sleep(1) 
+    #             time.sleep(1) 
 
-            task_name, support_batch, query_batch = batch
+    #         task_name, support_batch, query_batch = batch
 
-            task_loss = ddp(self, support_batch, query_batch, device)
-            task_loss = task_loss/num_tasks_per_iteration
-            task_loss.backward()
+    #         task_loss = ddp(self, support_batch, query_batch, device)
+    #         task_loss = task_loss/num_tasks_per_iteration
+    #         task_loss.backward()
 
-            loss_queue.put([task_loss.detach().item()])
+    #         loss_queue.put([task_loss.detach().item()])
 
     @abc.abstractmethod
     def run_inner_loop(
@@ -325,123 +336,95 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         """
         raise NotImplementedError()
 
-    ###### Model evaluation methods ######
+    # ###### Model evaluation methods ######
 
-    @abc.abstractmethod
-    def run_finetuning(
-        self,
-        support_batch: Dict[str, torch.Tensor],
-        task_type: str,
-        n_labels: int,
-    ) -> Dict[str, Any]:
-        """
-        Finetunes the model on a given support_batch for a model of type task_type with n_labels.
+    # @abc.abstractmethod
+    # def run_finetuning(
+    #     self,
+    #     support_batch: Dict[str, torch.Tensor],
+    #     task_type: str,
+    #     n_labels: int,
+    # ) -> Dict[str, Any]:
+    #     """
+    #     Finetunes the model on a given support_batch for a model of type task_type with n_labels.
 
-        Args:
-            * support_batch: A batch of task data represented as a dictionary containing the
-                data for the support set of a task to finetune on.
-            * task_type: The type of task to finetune on.
-            * n_labels: The number of labels for the task to finetune on.
+    #     Args:
+    #         * support_batch: A batch of task data represented as a dictionary containing the
+    #             data for the support set of a task to finetune on.
+    #         * task_type: The type of task to finetune on.
+    #         * n_labels: The number of labels for the task to finetune on.
 
-        Returns:
-            * inference_params: Returns any sort of params that need to be used for the 
-                run_inference_classification method 
-        """ 
-        raise NotImplementedError()
+    #     Returns:
+    #         * inference_params: Returns any sort of params that need to be used for the 
+    #             run_inference_classification method 
+    #     """ 
+    #     raise NotImplementedError()
 
-    @abc.abstractmethod
-    def run_inference(
-        self,
-        inference_dataloader: torch.utils.data.DataLoader,
-        task_type: str,
-        **inference_params: Dict[str, Any],
-    ) -> Tuple[List[int], int]:
-        """
-        Evaluates the model on the data of inference_dataloader which corresponds to a task of type 
-        task_type. This should only be called once run_finetuning has been run.
+    # @abc.abstractmethod
+    # def run_inference(
+    #     self,
+    #     inference_dataloader: torch.utils.data.DataLoader,
+    #     task_type: str,
+    #     **inference_params: Dict[str, Any],
+    # ) -> Tuple[List[int], int]:
+    #     """
+    #     Evaluates the model on the data of inference_dataloader which corresponds to a task of type 
+    #     task_type. This should only be called once run_finetuning has been run.
 
-        Args: 
-            * inference_dataloader: The dataset on which to perform model inference on.
-            * task_type: Type of task to evaluate on; should be the same as the task type 
-                passed into run_finetuning
-            * inference_params: Any params that need to be used for the inference task
+    #     Args: 
+    #         * inference_dataloader: The dataset on which to perform model inference on.
+    #         * task_type: Type of task to evaluate on; should be the same as the task type 
+    #             passed into run_finetuning
+    #         * inference_params: Any params that need to be used for the inference task
 
-        Returns: 
-            * predictions ([int]): A dictionary storing the model's predictions for each 
-                datapoint passed in from the inference_dataloader as an int. 
-            * loss (int): The value of the classification loss on the inference dataset.
-        """
-        raise NotImplementedError()
+    #     Returns: 
+    #         * predictions ([int]): A dictionary storing the model's predictions for each 
+    #             datapoint passed in from the inference_dataloader as an int. 
+    #         * loss (int): The value of the classification loss on the inference dataset.
+    #     """
+    #     raise NotImplementedError()
 
 
-class MetaBaseLearner(BaseLearner):
+class BaseMetaLearner(BaseLearner):
 
     def __init__(
         self,
-        base_model: BaseModel,
-        optimizer_type: str = 'adam',
-        meta_lr: Union[float, str] = 1e-2,
-        inner_lr: Union[float, str] = 1e-2,
-        classifier_lr: Union[float, str] = 1e-1,
-        num_learning_steps: Union[int, int] = 5,
+        initial_inner_lr: Union[float, str] = 1e-2,
+        initial_classifier_lr: Union[float, str] = 1e-1,
+        num_inner_loop_steps: Union[int, str] = 7,
         use_first_order: Union[bool, str] = False,
         **kwargs
     ) -> None:
         """ 
         Inherents from BaseLearner and establishes the base class for all meta-learners 
         (e.g. maml and platipus). Provides useful functionality for meta-learners which
-        rely on the torch higher library to maintain a functionalized version of the model 
-        with corresponding parameters that are clones and fed into the functionalized model.
+        rely on the torch higher library to functionalize the model 
 
         NOTE! The base_model we are meta learning needs to contain parameter names 
         that specify what layer the parameter is in (e.g. 'attention.layer.1'). This is because 
         we store per-layer parameter weights.
 
         Args:
-            * base_model: The model to be meta-learned (implementation of BaseModel)
-            * optimizer_type: The type of optimizer (e.g. 'adam') 
-            * meta_lr: Learning rate for the outer loop meta learning step
-            * inner_lr: Initial inner-loop learning rate of the base_model - this value is 
+            * initial_inner_lr: Initial inner-loop learning rate of the base_model - this value is 
                 learned over the course of meta-learning 
-            * classifier_lr: Initial inner-loop learning rate of the classifier head - this value
+            * initial_classifier_lr: Initial inner-loop learning rate of the classifier head - this value
                 is learned over the course of meta-learning 
-            * num_learning_steps: Number of gradients steps in the inner loop used to learn the
+            * num_inner_loop_steps: Number of gradients steps in the inner loop used to learn the
                 meta-learning task
             * use_first_order: Whether a first order approximation of higher-order gradients
                 should be used                
         """
-        super().__init__(base_model, **kwargs)
+        super().__init__(**kwargs)
 
-        # Setting up meta optimization parameters
-        self.optimizer_type = optimizer_type
-        self.meta_lr = float(meta_lr)
-
-        # Deducing the num of layers and mapping each parameter to the layer that parameter is in
-        self.param_idx_to_layer = {}
-        for idx, (name, _) in enumerate(base_model.named_parameters()): 
-            layer = re.findall(r"layer.\d*", name)
-
-            if len(layer) > 0:
-                # layer will return a list of strings of the form: ["layer.[number]"]
-                self.param_idx_to_layer[idx] = int(layer[0][6:])
-            else: 
-                self.param_idx_to_layer[idx] = None
+        self.inner_layers_lr = {
+            layer: torch.nn.Parameter(torch.tensor(float(initial_inner_lr)).to(self.base_device)) 
+                for layer in self.base_model.trainable_layers
+        }   
         
-        layers = set(self.param_idx_to_layer.values())       
-
-        # NOTE: Each layer gets its own learning rate 
-        # We store a list of learning rates for each layer of the model that are meta-learned 
-        # and we initialize each of these to inner_lr
-        self.inner_layers_lr = torch.nn.ParameterList([
-                                        torch.nn.Parameter(
-                                            torch.tensor(float(inner_lr)).to(self.base_device)
-                                        )
-                                        for layer in layers if layer is not None
-                                    ])
-
         # NOTE: The final classification layer also gets its own learning rate 
-        self.classifier_lr = torch.nn.Parameter(torch.tensor(float(classifier_lr)).\
-                                                    to(self.base_device))
+        self.classifier_lr = torch.nn.Parameter(
+            torch.tensor(float(initial_classifier_lr)).to(self.base_device)
+        )
         
         if len(self.inner_layers_lr) == 0:
             # NOTE: we are not storing any learning rates for any of the layers.
@@ -453,7 +436,7 @@ class MetaBaseLearner(BaseLearner):
             )
 
         # number of steps to perform in the inner loop
-        self.num_learning_steps = int(num_learning_steps)
+        self.num_inner_loop_steps = int(num_inner_loop_steps)
         
         # set flag to indicate if first-order approximation should be used (à la Reptile)
         if isinstance(use_first_order, str):
@@ -463,192 +446,122 @@ class MetaBaseLearner(BaseLearner):
 
     ### Base setup functionality for meta learning models
 
-    def setup_optimizer(self) -> None:
-        """ Helper function for setting up the (meta) optimizer """
-        if self.optimizer_type == 'adam': 
-            self.optimizer = torch.optim.Adam(params=self.meta_params_iter(), lr=self.meta_lr)
-        else:
-            logger.exception(f"Invalid optimizer type: {optimizer_type}")
-            raise Exception(f"Invalid optimizer type: {optimizer_type}")
-
-    def functionalize_model(self) -> None:
+    @property 
+    def innerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]: 
         """
-        Helper function for converting base_model into a functionalized form
+        Returns the parameter groups that are passed to the innerloop (diferentiable) optimizer.
         """
-        self.functional_model = higher.patch.make_functional(module=self.base_model)
 
-        # NOTE: these two lines are SUPER important (otherwise computation graph explodes)w
-        self.functional_model.track_higher_grads = False
-        self.functional_model._fast_params = [[]]
+        def extract_layer_num(layer_name): 
+            layer = re.findall(r"layer.\d*", layer_name)
 
-    def parameters(self) -> List[torch.Tensor]:
-        """ 
-        Overriding parent behavior to only return meta parameters
-        """
-        return self.meta_params_iter()
+            if len(layer) == 1:
+                # layer will return a list of strings of the form: ["layer.[number]"]
+                try: 
+                    return int(layer[0][6:])
+                except:
+                    return None
+            else: 
+                return None
 
-    @abc.abstractmethod
-    def meta_params_iter(self) -> Iterator[torch.Tensor]:
-        """ 
-        Returns an iterator over the meta parameters of the model. 
-        """
-        raise NotImplementedError()
 
-    # Overriding nn.Module functionality 
-    def state_dict(self) -> Dict[str, torch.Tensor]:
-        """
-        Overriding method to remove placeholder parameters defined by functional model. Called 
-        implicitly when saving and loading checkpoints.
+        param_groups = []
 
-        Returns: 
-            * updated_state_dict (Dict[str, torch.Tensor]): Dictionary of model parameters
-        """
-        original_state_dict = super().state_dict()
-        updated_state_dict = OrderedDict()
-
-        for key, val in original_state_dict.items():
-            if "functional" in key:
+        for idx, (name, param) in enumerate(self.base_model.named_parameters()): 
+            if not param.requires_grad:
                 continue
+
+            layer_num = extract_layer_num(name)
+            if layer_num is None: 
+                raise Exception(
+                    "Could not find an innerloop learning rate for param: {}".format(name)
+                )
+
+            layer_lr = self.inner_layers_lr[layer_num]
+
+            param_groups.append({
+                'params': param,
+                'lr': layer_lr,
+            })
+
+        return param_groups
             
-            updated_state_dict[key] = val
-        
-        return updated_state_dict
 
-    def setup_DDP(self, *args) -> Tuple[torch.device, DDP]:
-        """ 
-        Overriding parent behavior to ensure that the model is functionalized whenever we run 
-        the model in a distributed setting.
-
-        Returns:
-            * device (int): Device to run model on
-            * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
+    @property
+    def outerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
         """
-        device, ddp = super().setup_DDP(*args)
-        self.functionalize_model()
-        return (device, ddp)
-
-    ### Helper function for adapting the functionalized parameters based on some data_batch
-    def _adapt_params(
-        self,
-        data_batch_list: List[Dict[str, torch.Tensor]],
-        params: List[torch.Tensor],
-        task_head_weights: Dict[str, torch.Tensor],
-        learning_rate: Union[torch.nn.Parameter, torch.nn.ParameterList],
-        num_inner_steps: int,
-        optimize_classifier: bool = False,
-        clone_params: bool = True,
-        evaluation_mode: bool = False,
-    ) -> List[torch.Tensor]:
-        """ 
-        Adapted from: 
-        https://github.com/cnguyen10/few_shot_meta_learning
-
-        For a given batch of inputs and labels, we compute what the loss of the functional model 
-        would be if the weights of the model are set to params.  
+        Returns the parameter groups that are passed to the outerloop optimizer.
+        """
         
-        Note that this is the main reason that we have to convert the base model to a functional
-        version of the model that can take in its parameters as an argument
-        (as opposed to these parameters being stored in the model's state). 
+        param_groups = [
+            {
+                'params': [p for p in self.base_model.parameters() if p.requires_grad],
+            }, 
+            {
+                'params': self.inner_layers_lr.values(),
+            },
+            {
+                'params': [self.classifier_lr],
+            }
+        ]
 
-        The parameters are then updated using SGD with a given learning rate, and returned. 
-
-        Params:
-            * data_batch_list (dict): Batches of data that are used for training the model in the  
-                inner loop (see run_inner_loop for information on the data structure)
-            * params (iterable): Iterable of torch.nn.Parameter()s
-                (the params that we want to evaluate our model at)
-            * task_head_weights: Weights of the model head
-            * learning_rate (torch.nn.Parameter or torch.nn.ParameterList): The learning rate 
-                used to update the model parameters. Will be a ParameterList if we are storing
-                per-layer specific learning rates. 
-            * num_inner_steps: Number of inner steps to use for the adaptation process
-            * optimize_classifier: Whether to train the final classification layer as 
-                part of the adaptation process 
-            * clone_params: Whether to clone the params passed in (defaults to True)
-            * evaluation_mode: Whether running this method during evaluation
-                (either in finetuning or inference) (defaults to False)
-
-        Returns: 
-            * adapted_params: List of torch.nn.Parameter()s that represent the updated 
-                parameters after running SGD 
-        """                                        
-
-        if clone_params:
-            # copy the parameters but allow gradients to propagate back to original params
-            adapted_params = [torch.clone(p) for p in params]
-        else:
-            adapted_params = params
-
-        for num_step in range(num_inner_steps):
-            
-            if self.use_multiple_samples and not evaluation_mode: 
-                data_batch = data_batch_list[num_step]
-            else:
-                data_batch = data_batch_list[0]
-            
-            # Running forward pass through functional model and computing classificaiton loss
-            outputs = self.functional_model.forward(
-                input_ids=data_batch['input_ids'],
-                attention_mask=data_batch['attention_mask'],
-                params=adapted_params
-            )
-            _, loss = self._compute_task_loss(
-                outputs,
-                data_batch,
-                task_head_weights,
-                task_type='classification'
+        if self.retain_lm_head:
+            params_groups.append(
+                {
+                    'params': self.retained_lm_head_weights.values()
+                }
             )
 
-            # Computing resulting gradients of the inner loop
-            grad_params = [p for p in adapted_params if p.requires_grad]
+        return param_groups
 
-            if self.use_first_order or evaluation_mode:
-                grads = torch.autograd.grad(
-                    outputs=loss,
-                    inputs=grad_params,
-                    retain_graph=True,
-                )
-            else:
-                grads = torch.autograd.grad(
-                    outputs=loss,
-                    inputs=grad_params,
-                    create_graph=True,
-                )
+    # def setup_optimizer(self) -> None:
+    #     """ Helper function for setting up the (meta) optimizer """
+    #     if self.optimizer_type == 'adam': 
+    #         self.optimizer = torch.optim.Adam(params=self.meta_params_iter(), lr=self.meta_lr)
+    #     else:
+    #         logger.exception(f"Invalid optimizer type: {optimizer_type}")
+    #         raise Exception(f"Invalid optimizer type: {optimizer_type}")
 
-            # updating params
-            grad_counter = 0
-            for idx, p in enumerate(adapted_params):
-                
-                if isinstance(learning_rate, torch.nn.ParameterList):
-                    # Extracting the layer of the parameter
-                    p_layer = self.param_idx_to_layer[idx]
-                    if p_layer is None: 
-                        # Param is not in a layer we train (e.g. a pooling or embedding layer)
-                        # so the param should not have requires_grad set 
-                        assert(not p.requires_grad),\
-                            f"Model param at idx: {idx} requires grad but has no learning rate"
-                        continue
-                    param_lr = learning_rate[p_layer]
-                else: 
-                    param_lr = learning_rate
+    # def functionalize_model(self) -> None:
+    #     """
+    #     Helper function for converting base_model into a functionalized form
+    #     """
+    #     self.functional_model = higher.patch.make_functional(module=self.base_model)
 
-                if p.requires_grad:
-                    if param_lr is None: 
-                        logger.exception(f"Inner learning rate for param at idx: {idx} is None")
-                        raise Exception(f"Inner learning rate for param at idx: {idx} is None")
+    #     # NOTE: these two lines are SUPER important (otherwise computation graph explodes)
+    #     self.functional_model.track_higher_grads = False
+    #     self.functional_model._fast_params = [[]]
 
-                    adapted_params[idx] = adapted_params[idx] - param_lr * grads[grad_counter]
-                    grad_counter += 1
 
-            # optionally use SGD to update the weights of the final linear classification layer
-            # should only be done once we've already sampled phi weights
-            if optimize_classifier:
-                classifier_grads = torch.autograd.grad(
-                    outputs=loss,
-                    inputs=task_head_weights.values(),
-                )
-                for idx, weight_name in enumerate(task_head_weights.keys()):
-                    task_head_weights[weight_name] = task_head_weights[weight_name] - \
-                                                    self.classifier_lr * classifier_grads[idx]
+    # # Overriding nn.Module functionality 
+    # def state_dict(self) -> Dict[str, torch.Tensor]:
+    #     """
+    #     Overriding method to remove placeholder parameters defined by functional model. Called 
+    #     implicitly when saving and loading checkpoints.
 
-        return adapted_params
+    #     Returns: 
+    #         * updated_state_dict (Dict[str, torch.Tensor]): Dictionary of model parameters
+    #     """
+    #     original_state_dict = super().state_dict()
+    #     updated_state_dict = OrderedDict()
+
+    #     for key, val in original_state_dict.items():
+    #         if "functional" in key:
+    #             continue
+            
+    #         updated_state_dict[key] = val
+        
+    #     return updated_state_dict
+
+    # def setup_DDP(self, *args) -> Tuple[torch.device, DDP]:
+    #     """ 
+    #     Overriding parent behavior to ensure that the model is functionalized whenever we run 
+    #     the model in a distributed setting.
+
+    #     Returns:
+    #         * device (int): Device to run model on
+    #         * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
+    #     """
+    #     device, ddp = super().setup_DDP(*args)
+    #     self.functionalize_model()
+    #     return (device, ddp)

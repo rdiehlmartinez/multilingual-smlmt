@@ -10,7 +10,7 @@ from transformers import XLMRobertaModel
 from .base import BaseModel
 
 # typing imports
-from typing import List
+from typing import List, Union
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class XLMR(XLMRobertaModel):
     def from_kwargs(
         cls,
         pretrained_model_name: str = 'xlm-roberta-base', 
-        trainable_layers: List[int] = None,
+        trainable_layers: Union[List[int], str] = [],
         **kwargs
     ) -> None: 
         """ Loading in huggingface XLM-R model for masked LM """
@@ -44,19 +44,27 @@ class XLMR(XLMRobertaModel):
 
         
         # update model to require gradients only for trainable layers
-        if trainable_layers: 
-            if isinstance(trainable_layers, str):
-                trainable_layers = json.loads(trainable_layers)
-            
-            for name, param in model.named_parameters():
-                if any(f"layer.{layer_num}" in name for layer_num in trainable_layers):
-                    param.requires_grad = True
-                else:
-                    param.requires_grad = False
-        else:
-            logger.warning("No specific layers specified to meta learn")
+        if len(trainable_layers) == 0:
+            logger.warning("No layers specified to be meta learned")
+
+
+        if isinstance(trainable_layers, str):
+            trainable_layers = json.loads(trainable_layers)
+
+        model._trainable_layers = trainable_layers
+        
+        for name, param in model.named_parameters():
+            if any(f"layer.{layer_num}" in name for layer_num in trainable_layers):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
         return model
+
+    @property
+    def trainable_layers(self) -> List[int]:
+        """ Returns a list of the trainable layers (identified by their layer number) """
+        return self._trainable_layers
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         """ 
@@ -69,3 +77,4 @@ class XLMR(XLMRobertaModel):
     @property
     def hidden_dim(self) -> int: 
         return self._hidden_dim
+

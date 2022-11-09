@@ -6,91 +6,230 @@ Implements Model Agnostic Meta Learning: https://arxiv.org/abs/1703.03400
 import time
 import itertools
 import logging
+# custom higher version
+import lib.higher.higher as higher
 
 import torch
 import torch.distributed as dist
 
-from .base import MetaBaseLearner
+from .base import BaseMetaLearner
 from ..taskheads import TaskHead
 from ..utils import move_to_device
 
 # typing imports 
-from typing import Dict, Tuple, List, Dict, Iterator, Any
+from typing import Dict, Tuple, List, Dict, Iterator, Any, Union
 
 logger = logging.getLogger(__name__)
 
-class MAML(MetaBaseLearner):
-    def __init__(
-        self,
-        base_model: torch.nn.Module,
-        **kwargs,
-    ) -> None:
+class MAML(BaseMetaLearner):
+    def __init__(self, **kwargs,) -> None:
         """
-        MAML implements a type of MetaBaseLearner.
-
-        Reads in a base model and sets up all of the metalearning parameters. The core idea of 
-        MAML is to train a model using a two-loop approach - an outerloop that learns the learning 
-        process, and an inner loop in which the model is trained on a given meta-learning task.
-
-        Args: 
-            * base_model (implementation of BaseModel): The model to be meta-learned 
-                (implementation of BaseModel)
+        MAML implements a basic type of BaseMetaLearner.
+        The core idea is to train a model using a two-loop approach:
+            * the inner loop is used to adapt the model to a given task
+            * the outer loop is used to update the model parameters based on the loss of the 
+                adapted model on the query set of the task.
         """
+        super().__init__(**kwargs)
 
-        super().__init__(base_model, **kwargs)
-
-        # Initializing params of the functional model that will be meta-learned
-        self.model_params = torch.nn.ParameterList()
-        for param in base_model.parameters():
-            self.model_params.append(
-                torch.nn.Parameter(
-                    data=param.data.to(self.base_device),
-                    requires_grad=param.requires_grad
-                )
-            )
-
-        self.setup_optimizer()
-
-    ###### Helper functions ######
-
-    def meta_params_iter(self) -> Iterator[torch.Tensor]:
-        """ Returns an iterator over all of the meta parameters"""
-        return itertools.chain(
-            self.model_params,
-            self.inner_layers_lr,
-            [self.classifier_lr], 
-            self.retained_lm_head.values() if self.retain_lm_head else [],
-        )
-
-    def get_task_init_kwargs(
+    ###### Model training methods #####
+ 
+    ### Helper function for adapting the functionalized parameters based on some data_batch
+    def run_adaptation(
         self,
-        task_type: str,
-        task_init_method: str,
-        n_labels: int, 
-        **kwargs: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        support_batch_list: List[Dict[str, torch.Tensor]],
+        query_batch: Dict[str, torch.Tensor],
+        lm_head_weights: Dict[str, torch.Tensor],
+        num_adaptation_steps: int,
+    ) -> float:
         """ 
-        Override base implementation of this method to replace the model with the functional 
-        model and also pass in the model params when the task head is initialized using protomaml.
+        Helper function for adapting the weights of the base_model on a given task using the 
+        training data in support_batch_list. 
 
         Args:
-            * task_type: Type of task head to initialize
-            * task_init_method: Method for initializing the task head
-            * n_labels: Number of labels defined by the task (i.e. classes)
-            * kwargs: Additional arguments to pass to the task head initialization method
+            * support_batch_list: A list of task batches, each batch of task data is represented
+                as a dictionary containing the following information:
+                * input_ids (torch.tensor): Input tensors of shape (N*K, max_seq_len)
+                * input_target_idx (torch.tensor): Tensor indicating for each sample at what index
+                    we apply the final classification layer
+                * label_ids (torch.tensor): Tensor of labels corresponding to masked out subword id
+                * attention_mask (torch.tensor): Tensor indicating which tokens in input_ids are
+                    not pad tokens
+            * query_batch: A dictionary containing the query data. It should be of the same
+                structure as the support_batch_list.
+            * lm_head_weights: A dictionary containing the weights of the lm head to be used
+                for the adaptation.
+            * num_adaptation_steps: The number of adaptation steps to perform.        
         Returns:
-            * init_kwargs: Keyword arguments used by the initialization function 
-        """
+            * loss (float): The loss value of the adaptation process.
 
-        init_kwargs = super().get_task_init_kwargs(task_type, task_init_method, n_labels, **kwargs)
-        if 'protomaml' in task_init_method:
-            init_kwargs['model'] = self.functional_model
-            init_kwargs['params'] = self.model_params
+        """              
 
-        return init_kwargs
-    
-    ###### Model training methods ######
- 
+        # Getting lrs for each parameter group
+        inner_loop_optimizer_lrs = {'lr': []}
+        for param_group in self.innerloop_optimizer_param_groups: 
+            inner_loop_optimizer_lrs['lr'].append(param_group['lr'])
+
+        inner_loop_optimizer_params = [
+            {'params': pg['params']} for pg in self.innerloop_optimizer_param_groups
+        ]
+
+        # Setting up the inner loop optimizer; note that we need pass in the learning rates 
+        # for each parameter group as an override argument to the higher diffopt optimizer
+        inner_loop_optimizer = torch.optim.SGD(inner_loop_optimizer_params, lr=0.0)
+
+        with torch.backends.cudnn.flags(enabled=True), higher.innerloop_ctx(
+            self.base_model,
+            inner_loop_optimizer,
+            copy_initial_weights=False,
+            track_higher_grads=False,
+            override=inner_loop_optimizer_lrs,
+        ) as (flearner, diffopt):
+            
+            # Running the inner loop adaptation to the support set 
+            self.train()
+            flearner.train()
+            flearner.zero_grad()
+
+            # --- RUNNING ADAPTATION
+            for num_step in range(num_adaptation_steps):
+
+                if self.use_multiple_samples: 
+                    support_batch = support_batch_list[num_step]
+                else:
+                    support_batch = support_batch_list[0]
+
+                # Forward pass
+                outputs = flearner(
+                    input_ids=support_batch['input_ids'],
+                    attention_mask=support_batch['attention_mask']
+                )
+
+                _, loss = self._compute_task_loss(
+                    outputs,
+                    support_batch,
+                    lm_head_weights, 
+                    task_type='classification'
+                )
+
+                # updating the task head
+                classifier_grads = torch.autograd.grad(
+                    outputs=loss,
+                    inputs=lm_head_weights.values(),
+                    retain_graph=True
+                )
+                for idx, weight_name in enumerate(lm_head_weights.keys()):
+                    lm_head_weights[weight_name] = lm_head_weights[weight_name] - \
+                                                    self.classifier_lr * classifier_grads[idx]
+
+                # Inner loop backward pass
+                diffopt.step(loss)
+
+            # --- FINISHED ADAPTATION        
+
+            # Disable dropout
+            for module in flearner.modules():
+                if isinstance(module, torch.nn.Dropout):
+                    module.eval()
+
+            query_outputs = flearner(
+                    input_ids=query_batch['input_ids'],
+                    attention_mask=query_batch['attention_mask'],
+            )
+            _, query_loss = self._compute_task_loss(
+                query_outputs,
+                query_batch,
+                lm_head_weights,
+                task_type='classification'
+            )
+
+            """ 
+            NOTE: It is up to us to ensure that the gradients with respect to the learnable 
+            meta parameters are computed and stored in the grad attribute of the meta parameters
+            so that the meta optimizer can in the outerloop update the meta parameters.
+            """
+
+            # --- 1) UPDATING THE BASE MODEL PARAMETERS
+            
+            # gradient of query_loss with respect to the adapted params --> First Order Approximation
+            meta_grads = torch.autograd.grad(
+                outputs=query_loss, 
+                inputs=[p for p in flearner.parameters() if p.requires_grad],
+                retain_graph=True
+            )
+
+            if "protomaml" in self.lm_head_init_method:                
+                # if using protomaml, we need to account for the gradient that results from 
+                # the gradient of the query loss with respect to initialization of the task head
+                proto_grads = torch.autograd.grad(
+                    outputs=query_loss,
+                    inputs=[p for p in self.base_model.parameters() if p.requires_grad],
+                    retain_graph=True
+                )
+                meta_grads = [mg + pg for (mg, pg) in zip(meta_grads, proto_grads)]
+
+            for param, meta_grad in zip(
+                [p for p in self.base_model.parameters() if p.requires_grad],
+                meta_grads
+            ):
+                if param.grad is not None:
+                    param.grad += meta_grad.detach()
+                else:
+                    param.grad = meta_grad.detach()
+
+            # --- [ OPTIONAL 2)] UPDATING THE RETAINED TASK HEAD PARAMETERS
+            if self.retain_lm_head:
+                # gradient of query_loss with respect to the task head weights
+                lm_head_grads = torch.autograd.grad(
+                    outputs=query_loss,
+                    inputs=self.retained_lm_head_weights.values(),
+                    retain_graph=True
+                )
+                for param, lm_head_grad in zip(
+                    self.retained_lm_head_weights.values(),
+                    lm_head_grads
+                ):
+                    if param.grad is not None:
+                        param.grad += lm_head_grad.detach()
+                    else:
+                        param.grad = lm_head_grad.detach()
+
+
+            # --- 3) UPDATING THE CLASSIFIER LEARNING RATE 
+
+            if self.classifier_lr.grad is not None: 
+                self.classifier_lr.grad += torch.autograd.grad(
+                    outputs=query_loss,
+                    inputs=self.classifier_lr,
+                    retain_graph=True
+                )[0].detach()
+            else:
+                self.classifier_lr.grad = torch.autograd.grad(
+                    outputs=query_loss,
+                    inputs=self.classifier_lr,
+                    retain_graph=True
+                )[0].detach()
+
+
+            # --- 4) UPDATING THE INNER LOOP LEARNING RATES
+
+            for layer_num, inner_layer_lr in self.inner_layers_lr.items():
+                
+                if inner_layer_lr.grad is not None:
+                    inner_layer_lr.grad += torch.autograd.grad(
+                        outputs=query_loss,
+                        inputs=inner_layer_lr,
+                        retain_graph=True
+                    )[0].detach()
+                else:
+                    inner_layer_lr.grad = torch.autograd.grad(
+                        outputs=query_loss,
+                        inputs=inner_layer_lr,
+                        retain_graph=True
+                    )[0].detach()
+
+        return query_loss.detach().item()
+
 
     ### Main Inner Training Loop 
     def run_inner_loop(
@@ -100,9 +239,7 @@ class MAML(MetaBaseLearner):
         device: torch.device = None, 
     ) -> torch.Tensor: 
         """
-        Implements the inner loop of the MAML process - clones the parameters of the model 
-        and trains those params using the support_batch_list for self.num_learning_steps number 
-        of steps using SGD.
+        Implements the inner loop of the MAML process.
         
         Args: 
             * support_batch_list: A list of task batches, each batch of task data is represented
@@ -123,13 +260,6 @@ class MAML(MetaBaseLearner):
         if device is None:
             device = self.base_device
 
-        if not hasattr(self, "functional_model"):
-            # If not using multiprocessing training, the first iteration of run_inner_loop
-            # will have to functionalize the model 
-            self.functionalize_model()
-
-        self.functional_model.train()
-
         # Moving data to appropriate device
         support_batch_list = [
             move_to_device(support_batch, device) 
@@ -137,11 +267,16 @@ class MAML(MetaBaseLearner):
         ]
         query_batch = move_to_device(query_batch, device)
        
-        num_inner_steps = self.num_learning_steps
+        num_adaptation_steps = self.num_inner_loop_steps
 
         # Setting up LM head for task training (either using existing one or setting up new one)
         if self.retain_lm_head:
-            lm_head = self.retained_lm_head
+            # we need to clone the parameters of the LM head so that we can temporarily 
+            # update them during the inner loop
+            lm_head_weights = {
+                key: torch.clone(val) for key, val in self.retained_lm_head_weights.items()
+            }
+
         else:
             init_kwargs = self.get_task_init_kwargs(
                 'classification',
@@ -151,177 +286,82 @@ class MAML(MetaBaseLearner):
                 device=device
             )
 
-            lm_head = TaskHead.initialize_task_head(**init_kwargs)
+            lm_head_weights = TaskHead.initialize_task_head(**init_kwargs)
             
             if 'protomaml' in self.lm_head_init_method and self.use_multiple_samples:
                 # If we're using protomaml, the first batch is used for sampling the task head 
                 support_batch_list = support_batch_list[1:]
-                num_inner_steps = self.num_learning_steps - 1 
+                num_adaptation_steps = self.num_inner_loop_steps - 1 
 
-        # NOTE: anytime we update the lm head we need to clone the params
-        adapted_lm_head = {key: torch.clone(param) for key, param in lm_head.items()}
-
-        # adapting params to the support set -> adapted params are phi
-        phi = self._adapt_params(
-            data_batch_list=support_batch_list, 
-            params=self.model_params, 
-            task_head_weights=adapted_lm_head,
-            learning_rate=self.inner_layers_lr,
-            num_inner_steps=num_inner_steps,
-            clone_params=True,
-            optimize_classifier=True
-        )
-
-        # evaluating on the query batch using the adapted params phi  
-        self.functional_model.eval()
-
-        outputs = self.functional_model.forward(
-            input_ids=query_batch['input_ids'],
-            attention_mask=query_batch['attention_mask'],
-            params=phi
-        )
-
-        self.functional_model.train()
-
-        _, loss = self._compute_task_loss(
-            outputs,
+        loss = self.run_adaptation(
+            support_batch_list,
             query_batch,
-            adapted_lm_head, 
-            task_type='classification'
+            lm_head_weights,
+            num_adaptation_steps
         )
 
         return loss
 
 
-    ###### Model evaluation methods ######
-
-    def run_finetuning(
-        self,
-        support_batch: Dict[str, torch.Tensor],
-        task_type: str,
-        n_labels: int,
-    ) -> Dict[str, Any]: 
+    def run_evaluation(
+        self, 
+        support_batch, 
+        evaluation_dataloader,
+        num_classes,
+    ): 
         """
-        Creates a copy of the trained model parameters and continues to finetune these 
-        parameters on a given dataset. 
-        
-        Args: 
-            * support_batch (dict): Dictionary corresponding to the support batch for finetuning 
-                the model on a given task.
-            * task_type (str): Type of task (e.g. 'classification')
-            * n_labels (int): The number of labels in the given finetuning task
-
-        Returns:
-            * inference_params dict containing: 
-                * finetuned_params ([nn.Parameter]): List of the finetuned model's parameters
-                * task_head_weights (dict): Weights of task head (classifier head)
         """
 
-        if not hasattr(self, "functional_model"):
-            # NOTE: Edge case for if the model is only being evaluated without having 
-            # been trained
-            self.functionalize_model()
-
-        self.functional_model.train()
-
-        ### Initializing the task head used for the downstream NLU task
+         ### Initializing the task head used for the downstream NLU task
         support_batch = move_to_device(support_batch, self.base_device)
         init_kwargs = self.get_task_init_kwargs(
-            task_type,
+            'classification',
             self.lm_head_init_method,
-            n_labels,
+            num_classes,
             data_batch=support_batch if 'protomaml' in self.lm_head_init_method else None,
         )
         task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
 
-        # detaching parameters from original computation graph to create new leaf variables
-        finetuned_model_params = []
-        for p in self.model_params:
-            detached_p = p.clone().detach()
-            detached_p.requires_grad = p.requires_grad
-            finetuned_model_params.append(detached_p)
-
-        finetuned_task_head_weights = {}
-        for k, p in task_head_weights.items():
-            detached_p = p.detach()
-            detached_p.requires_grad = True
-            finetuned_task_head_weights[k] = detached_p
-
-        support_batch = move_to_device(support_batch, self.base_device)
-        finetuned_model_params = self._adapt_params(
-            data_batch_list=[support_batch], 
-            params=finetuned_model_params, 
-            task_head_weights=finetuned_task_head_weights,
-            learning_rate=self.inner_layers_lr,
-            num_inner_steps=self.num_learning_steps,
-            clone_params=False,
-            optimize_classifier=True,
-            evaluation_mode=True
+        eval_predictions, total_eval_loss = self._adapt_params(
+            [support_batch],
+            None, 
+            task_head_weights,
+            self.num_inner_loop_steps,
+            evaluation=True,
+            eval_dataloader=evaluation_dataloader
         )
 
-        inference_params = {
-            "finetuned_params": finetuned_model_params, 
-            "task_head_weights": finetuned_task_head_weights
-        }
 
-        return inference_params
+                # # Running full evaluation
+
+                # eval_predictions = []
+                # total_eval_loss = 0.0
+                # total_eval_samples = 0
+
+                # for eval_batch in eval_dataloader: 
+                #     eval_batch = move_to_device(eval_batch, self.base_device)
+
+                #     eval_outputs = flearner(
+                #         input_ids=eval_batch['input_ids'],
+                #         attention_mask=eval_batch['attention_mask'],
+                #     )
+
+                #     eval_logits, eval_loss = self._compute_task_loss(
+                #         eval_outputs, 
+                #         eval_batch,
+                #         task_head_weights,
+                #         task_type='classification'
+                #     )
+
+                #     eval_predictions.extend(torch.argmax(eval_logits, dim=-1).tolist())
+
+                #     batch_size = eval_logits.size(0)
+                #     total_eval_loss += eval_loss.item() * batch_size # loss is averaged across batch
+                #     total_eval_samples += batch_size 
+
+                # total_eval_loss /= total_eval_samples
+
+                # return (eval_predictions, total_eval_loss)
 
 
-    def run_inference(self,
-        inference_dataloader: torch.utils.data.DataLoader,
-        task_type: str,
-        finetuned_params: List[torch.nn.Parameter],
-        task_head_weights: Dict[str, torch.Tensor],
-    ) -> Tuple[List[int], int]:
-        """ 
-        This method is to be called after run_finetuning. 
-        
-        As the name suggests, this method runs inference on an NLU dataset for some task.
-
-        Args: 
-            * inference_dataloader: The dataset for inference is passed
-                in as a dataloader (in most cases this will be an NLUDataloader)
-            * task_type (str): Type of task (e.g. 'classification')
-            * finetuned_params ([nn.Parameter]): List of the finetuned model's parameters
-            * task_head_weights (dict): Weights of task head (classifier head)
-
-        Returns: 
-            * predictions: A list storing the model's predictions for each 
-                datapoint passed in from the inference_dataloader as an int. 
-            * loss: The value of the classification loss on the inference dataset.
-        """
-
-        if not hasattr(self, "functional_model"):
-            # If the model is only being evaluated (and not being finetuned) it might not have
-            # a functionalized version
-            self.functionalize_model()
-        
-        predictions = []
-        total_loss = 0.0
-        total_samples = 0
-
-        # Running final inference script over the evaluation data
-        with torch.no_grad():
-            self.functional_model.eval()
-
-            for data_batch in inference_dataloader: 
-                data_batch = move_to_device(data_batch, self.base_device)
-
-                outputs = self.functional_model.forward(input_ids=data_batch['input_ids'],
-                                                        attention_mask=data_batch['attention_mask'],
-                                                        params=finetuned_params)
-
-                logits, loss = self._compute_task_loss(outputs, data_batch, task_head_weights,
-                                                       task_type=task_type)
-
-                predictions.extend(torch.argmax(logits, dim=-1).tolist())
-
-                batch_size = logits.size(0)
-                total_loss += loss.item() * batch_size # loss is averaged across batch
-                total_samples += batch_size 
-
-            total_loss /= total_samples
-
-            self.functional_model.train()
-
-        return (predictions, total_loss)
+        return (eval_predictions, total_eval_loss)

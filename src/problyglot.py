@@ -1,12 +1,19 @@
 __author__ = 'Richard Diehl Martinez'
 """ Wrapper class for training and evaluating a model using a given meta learning technique """
 
+import sys 
+sys.path.insert(0, '../lib')
+
+
 import typing
 import torch
 import logging 
 import wandb
 import time 
 import os 
+
+# TODO: temporary
+from transformers import AdamW, get_constant_schedule_with_warmup
 
 import torch.multiprocessing as mp
 
@@ -19,6 +26,7 @@ from .datasets import MetaDataset, MetaDataLoader
 # Importing type hints  
 from configparser import ConfigParser
 from typing import Union
+from torch.optim import Optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +63,7 @@ class Problyglot(object):
                 "return_standard_labels",
                 fallback=False
             )
+            
             self.meta_dataloader = MetaDataLoader(
                 self.meta_dataset,
                 return_standard_labels=self.return_standard_labels
@@ -74,6 +83,9 @@ class Problyglot(object):
         # setting num_task_batches before learner, to inform learner if we are resuming training 
         # or starting fresh 
         self.num_task_batches = resume_num_task_batches if resume_num_task_batches else 0
+
+        # setting meta learning rate 
+        self.meta_lr = config.getfloat("PROBLYGLOT", "meta_learning_rate", fallback=1e-3)
 
         # setting learner 
         self.learner_method = self.config.get("LEARNER", "method")
@@ -153,7 +165,7 @@ class Problyglot(object):
             raise Exception(f"Invalid learner method: {learner_method}")
 
         learner = learner_cls(
-            self.base_model,
+            base_model=self.base_model,
             base_device=self.base_device,
             seed=self.config.getint("EXPERIMENT", "seed"),
             **learner_kwargs
@@ -176,6 +188,8 @@ class Problyglot(object):
                 wandb_checkpoint = wandb.restore(checkpoint_file, run_path=checkpoint_run)
                 checkpoint = torch.load(wandb_checkpoint.name)
                 learner.load_state_dict(checkpoint['learner_state_dict'], strict=False)
+
+                # TODO load in optimizer state dict to self.meta_optimizer
                 learner.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 os.rename(os.path.join(wandb.run.dir, checkpoint_file),
                           os.path.join(wandb.run.dir, "loaded_checkpoint.pt"))
@@ -237,11 +251,41 @@ class Problyglot(object):
         # exit code 124 triggers re-run
         exit(124)
 
+
+    def setup_meta_optimizer(self) -> Optimizer:
+        """
+        Helper function for setting up meta optimizer.
+
+        Returns: 
+            * meta_optimizer (Optimizer): meta optimizer to be used for meta learning
+        """
+        meta_optimizer = AdamW(self.learner.outerloop_optimizer_param_groups, lr=self.meta_lr)
+        meta_optimizer.zero_grad()
+        return meta_optimizer
+
+    def meta_optimizer_step(self, grad_norm_constant: int) -> None:
+        """
+        Helper function for performing meta optimization step. Normalizes the gradients by the
+        value of grad_norm_constant and performs a step on the meta optimizer.
+
+        Args: 
+            * grad_norm_constant (int): value to normalize gradients by
+        """
+
+        for param_group in self.learner.outerloop_optimizer_params:
+            for param in param_group['params']:
+                param.grad /= num_tasks_per_iteration
+
+        self.meta_optimizer.step()
+        self.meta_optimizer.zero_grad()
+
     def __call__(self) -> None: 
         """ 
         Train or evaluate the self.base_model via the self.learner training procedure 
         on data stored in self.meta_dataloader
         """
+
+        self.meta_optimizer = self.setup_meta_optimizer()
 
         ### --------- Evaluation Mode (will return early) ---------- 
         if not hasattr(self, "meta_dataset"):
@@ -320,15 +364,16 @@ class Problyglot(object):
         if self.use_wandb:
             wandb.define_metric("train.loss", step_metric="num_task_batches", summary='min')
 
-            if self.learner_method != "baseline":
-                # any meta-learning approach will want to track the learned learning rates
-                wandb.define_metric("classifier_lr", step_metric="num_task_batches")
+            # TODO: ADD ME BACK IN
+            # if self.learner_method != "baseline":
+            #     # any meta-learning approach will want to track the learned learning rates
+            #     wandb.define_metric("classifier_lr", step_metric="num_task_batches")
                 
-                # for inner layers we need to track lr per layer
-                num_layers = len(self.learner.inner_layers_lr)
-                for layer_idx in range(num_layers):
-                    wandb.define_metric(f"inner_layer_{layer_idx}_lr",
-                                        step_metric="num_task_batches")
+            #     # for inner layers we need to track lr per layer
+            #     num_layers = len(self.learner.inner_layers_lr)
+            #     for layer_idx in range(num_layers):
+            #         wandb.define_metric(f"inner_layer_{layer_idx}_lr",
+            #                             step_metric="num_task_batches")
 
         if self.config.getboolean("PROBLYGLOT", "run_initial_eval", fallback=True) and \
             self.num_task_batches == 0:
@@ -344,22 +389,20 @@ class Problyglot(object):
         ### Model training loop
 
         logger.info("Starting model training")
-        for batch_idx, batch in enumerate(self.meta_dataloader):
-            logger.debug(f"\t (Task idx {batch_idx}) Language: {batch[0]}")
+        for task_batch_idx, task_batch in enumerate(self.meta_dataloader):
+            logger.debug(f"\t (Task idx {task_batch_idx}) Language: {task_batch[0]}")
             if self.use_multiple_gpus:
                 ## Filling up data queue for workers to process
-                data_queue.put([batch], False)
+                data_queue.put([task_batch], False)
             else:
                 ## Basic training with just a single GPU 
-                task_name, support_batch_list, query_batch = batch
+                task_name, support_batch_list, query_batch = task_batch
 
                 task_loss = self.learner.run_inner_loop(support_batch_list, query_batch)            
                 task_loss = task_loss/num_tasks_per_iteration # normalizing loss 
-                task_loss.backward()
+                task_batch_loss += task_loss
 
-                task_batch_loss += task_loss.detach().item()
-
-            if ((batch_idx + 1) % num_tasks_per_iteration == 0):
+            if ((task_batch_idx + 1) % num_tasks_per_iteration == 0):
                 #### NOTE: Just finished a batch of tasks 
 
                 if self.use_multiple_gpus: 
@@ -383,23 +426,25 @@ class Problyglot(object):
                     while step_optimizer.is_set():
                         time.sleep(1)
                 else: 
-                    self.learner.optimizer_step(set_zero_grad=True)
+                    # single GPU: taking optimizer step
+                    self.meta_optimizer_step()
 
                 ### Logging out training results
                 logger.info(f"No. batches of tasks processed: {self.num_task_batches}")
                 logger.info(f"\t(Meta) training loss: {task_batch_loss}")
                 if self.use_wandb:
                     
-                    if self.learner_method != "baseline": 
-                        # wandb logging info for any meta-learner
-                        wandb.log({"classifier_lr": self.learner.classifier_lr.item()},
-                                   commit=False
-                                  )
+                    # TODO: ADD ME BACK IN
+                    # if self.learner_method != "baseline": 
+                    #     # wandb logging info for any meta-learner
+                    #     wandb.log({"classifier_lr": self.learner.classifier_lr.item()},
+                    #                commit=False
+                    #               )
 
-                        for layer_idx, inner_layer in enumerate(self.learner.inner_layers_lr):
-                                wandb.log({f"inner_layer_{layer_idx}_lr": inner_layer.item()}, 
-                                          commit=False
-                                         )
+                    #     for layer_idx, inner_layer in enumerate(self.learner.inner_layers_lr):
+                    #             wandb.log({f"inner_layer_{layer_idx}_lr": inner_layer.item()}, 
+                    #                       commit=False
+                    #                      )
 
                     wandb.log({"train.loss": task_batch_loss,
                                "num_task_batches": self.num_task_batches},

@@ -125,19 +125,25 @@ class Evaluator(object):
                     batch_size=self.batch_size
                 )
 
-                ### Running Finetuning
-                inference_params = learner.run_finetuning(
-                    support_batch, 
-                    task_type,
+                predictions, eval_loss = learner.run_evaluation(
+                    support_batch,
+                    evaluation_dataloader,
                     num_classes,
                 )
 
-                ### Running Inference 
-                predictions, eval_loss = learner.run_inference(
-                    evaluation_dataloader,
-                    task_type,
-                    **inference_params,
-                )
+                # ### Running Finetuning
+                # inference_params = learner.run_finetuning(
+                #     support_batch, 
+                #     task_type,
+                #     num_classes,
+                # )
+
+                # ### Running Inference 
+                # predictions, eval_loss = learner.run_inference(
+                #     evaluation_dataloader,
+                #     task_type,
+                #     **inference_params,
+                # )
 
                 ### Logging out metrics
                 if self.use_wandb:
