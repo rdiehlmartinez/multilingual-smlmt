@@ -48,10 +48,8 @@ class XNLIDataGenerator(NLUTaskDataGenerator):
 
         self.language_files = self._get_language_files(self.root_path)
 
-        self.K = config.getint("XNLI", "k")
-
-        super().__init__(config)
-
+        self._task_head_init_method = config.get("XNLI", "task_head_init_method")
+        
     def _get_language_files(self, root_path: str) -> List[Dict[str, Dict[str, str]]]:
         """ 
         Helper function for setting up finetune-evaluation data pairs.
@@ -113,6 +111,10 @@ class XNLIDataGenerator(NLUTaskDataGenerator):
     def task_type(self) -> str: 
         return 'classification'
 
+    @property
+    def task_head_init_method(self) -> str:
+        return self._task_head_init_method
+
     def __iter__(self):
         """ 
         At each iteration yields a batch of support data and an iterable evaluation dataset which
@@ -124,13 +126,10 @@ class XNLIDataGenerator(NLUTaskDataGenerator):
             # english which did not need to be translated 
             is_translated = language_file_dict['finetune']['lng'] != "en"
 
-            support_batch = XNLIDataset(
+            finetune_dataset = XNLIDataset(
                 lng=language_file_dict['finetune']['lng'],
                 file_path=language_file_dict['finetune']['file_path'],
                 translated=is_translated,
-            ).generate_N_K_samples(
-                N=self.num_classes,
-                K=self.K,
             )
 
             evaluation_dataset = XNLIDataset(
@@ -139,7 +138,7 @@ class XNLIDataGenerator(NLUTaskDataGenerator):
                 translated=False,
             )
 
-            yield (support_batch, evaluation_dataset)
+            yield (finetune_dataset, evaluation_dataset)
 
 
 class XNLIDataset(NLUDataset):

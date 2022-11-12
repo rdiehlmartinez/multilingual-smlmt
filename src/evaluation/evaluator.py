@@ -106,6 +106,7 @@ class Evaluator(object):
             task_data_generator = self.task_data_generators[task]
 
             task_type = task_data_generator.task_type
+            task_head_init_method = task_data_generator.task_head_init_method
             num_classes = task_data_generator.num_classes
 
             if task_type == "classification": 
@@ -116,9 +117,16 @@ class Evaluator(object):
                 logger.exception(f"Invalid task type: {task_params['task_type']} for task: {task}")
                 raise Exception(f"Invalid task type: {task_params['task_type']} for task: {task}")
 
-            for subtask_idx, (support_batch, evaluation_dataset) in enumerate(task_data_generator):
+            for subtask_idx, (finetune_dataset, evaluation_dataset) in enumerate(task_data_generator):
+                finetune_lng = finetune_dataset.language
                 evaluation_lng = evaluation_dataset.language
-                logger.info(f"\t Evaluating on: {evaluation_lng}")
+
+                logger.info(f"\t Finetuning on: {finetune_lng} - Evaluating on: {evaluation_lng}")
+
+                finetune_dataloader = NLUDataLoader(
+                    finetune_dataset,
+                    batch_size=self.batch_size
+                )
 
                 evaluation_dataloader = NLUDataLoader(
                     evaluation_dataset,
@@ -126,24 +134,12 @@ class Evaluator(object):
                 )
 
                 predictions, eval_loss = learner.run_evaluation(
-                    support_batch,
+                    finetune_dataloader,
                     evaluation_dataloader,
+                    task_type,
+                    task_head_init_method,
                     num_classes,
                 )
-
-                # ### Running Finetuning
-                # inference_params = learner.run_finetuning(
-                #     support_batch, 
-                #     task_type,
-                #     num_classes,
-                # )
-
-                # ### Running Inference 
-                # predictions, eval_loss = learner.run_inference(
-                #     evaluation_dataloader,
-                #     task_type,
-                #     **inference_params,
-                # )
 
                 ### Logging out metrics
                 if self.use_wandb:

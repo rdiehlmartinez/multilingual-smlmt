@@ -338,52 +338,6 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
     # ###### Model evaluation methods ######
 
-    # @abc.abstractmethod
-    # def run_finetuning(
-    #     self,
-    #     support_batch: Dict[str, torch.Tensor],
-    #     task_type: str,
-    #     n_labels: int,
-    # ) -> Dict[str, Any]:
-    #     """
-    #     Finetunes the model on a given support_batch for a model of type task_type with n_labels.
-
-    #     Args:
-    #         * support_batch: A batch of task data represented as a dictionary containing the
-    #             data for the support set of a task to finetune on.
-    #         * task_type: The type of task to finetune on.
-    #         * n_labels: The number of labels for the task to finetune on.
-
-    #     Returns:
-    #         * inference_params: Returns any sort of params that need to be used for the 
-    #             run_inference_classification method 
-    #     """ 
-    #     raise NotImplementedError()
-
-    # @abc.abstractmethod
-    # def run_inference(
-    #     self,
-    #     inference_dataloader: torch.utils.data.DataLoader,
-    #     task_type: str,
-    #     **inference_params: Dict[str, Any],
-    # ) -> Tuple[List[int], int]:
-    #     """
-    #     Evaluates the model on the data of inference_dataloader which corresponds to a task of type 
-    #     task_type. This should only be called once run_finetuning has been run.
-
-    #     Args: 
-    #         * inference_dataloader: The dataset on which to perform model inference on.
-    #         * task_type: Type of task to evaluate on; should be the same as the task type 
-    #             passed into run_finetuning
-    #         * inference_params: Any params that need to be used for the inference task
-
-    #     Returns: 
-    #         * predictions ([int]): A dictionary storing the model's predictions for each 
-    #             datapoint passed in from the inference_dataloader as an int. 
-    #         * loss (int): The value of the classification loss on the inference dataset.
-    #     """
-    #     raise NotImplementedError()
-
 
 class BaseMetaLearner(BaseLearner):
 
@@ -397,8 +351,8 @@ class BaseMetaLearner(BaseLearner):
     ) -> None:
         """ 
         Inherents from BaseLearner and establishes the base class for all meta-learners 
-        (e.g. maml and platipus). Provides useful functionality for meta-learners which
-        rely on the torch higher library to functionalize the model 
+        (e.g. maml). Provides useful functionality for meta-learners which rely on the torch
+        higher library to functionalize the model 
 
         NOTE! The base_model we are meta learning needs to contain parameter names 
         that specify what layer the parameter is in (e.g. 'attention.layer.1'). This is because 
@@ -447,10 +401,24 @@ class BaseMetaLearner(BaseLearner):
     ### Base setup functionality for meta learning models
 
     @property 
-    def innerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]: 
+    def innerloop_optimizer_param_groups(
+        self,
+        base_model_override: torch.nn.Module = None
+    ) -> Iterator[Dict[str, torch.nn.Parameter]]: 
         """
         Returns the parameter groups that are passed to the innerloop (diferentiable) optimizer.
+
+        Args: 
+            * base_model_override: Optional torch.nn.Module to override the base_model stored in 
+                the class. This is useful if we want to use a different model for the inner loop
+                than the one we are meta-learning; for instance if we want to copy the base model 
+                and train it on a specific downstream NLU task. 
         """
+
+        if base_model_override is None:
+            base_model = self.base_model
+        else:
+            base_model = base_model_override
 
         def extract_layer_num(layer_name): 
             layer = re.findall(r"layer.\d*", layer_name)
@@ -464,10 +432,9 @@ class BaseMetaLearner(BaseLearner):
             else: 
                 return None
 
-
         param_groups = []
 
-        for idx, (name, param) in enumerate(self.base_model.named_parameters()): 
+        for idx, (name, param) in enumerate(base_model.named_parameters()): 
             if not param.requires_grad:
                 continue
 
@@ -513,55 +480,3 @@ class BaseMetaLearner(BaseLearner):
             )
 
         return param_groups
-
-    # def setup_optimizer(self) -> None:
-    #     """ Helper function for setting up the (meta) optimizer """
-    #     if self.optimizer_type == 'adam': 
-    #         self.optimizer = torch.optim.Adam(params=self.meta_params_iter(), lr=self.meta_lr)
-    #     else:
-    #         logger.exception(f"Invalid optimizer type: {optimizer_type}")
-    #         raise Exception(f"Invalid optimizer type: {optimizer_type}")
-
-    # def functionalize_model(self) -> None:
-    #     """
-    #     Helper function for converting base_model into a functionalized form
-    #     """
-    #     self.functional_model = higher.patch.make_functional(module=self.base_model)
-
-    #     # NOTE: these two lines are SUPER important (otherwise computation graph explodes)
-    #     self.functional_model.track_higher_grads = False
-    #     self.functional_model._fast_params = [[]]
-
-
-    # # Overriding nn.Module functionality 
-    # def state_dict(self) -> Dict[str, torch.Tensor]:
-    #     """
-    #     Overriding method to remove placeholder parameters defined by functional model. Called 
-    #     implicitly when saving and loading checkpoints.
-
-    #     Returns: 
-    #         * updated_state_dict (Dict[str, torch.Tensor]): Dictionary of model parameters
-    #     """
-    #     original_state_dict = super().state_dict()
-    #     updated_state_dict = OrderedDict()
-
-    #     for key, val in original_state_dict.items():
-    #         if "functional" in key:
-    #             continue
-            
-    #         updated_state_dict[key] = val
-        
-    #     return updated_state_dict
-
-    # def setup_DDP(self, *args) -> Tuple[torch.device, DDP]:
-    #     """ 
-    #     Overriding parent behavior to ensure that the model is functionalized whenever we run 
-    #     the model in a distributed setting.
-
-    #     Returns:
-    #         * device (int): Device to run model on
-    #         * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
-    #     """
-    #     device, ddp = super().setup_DDP(*args)
-    #     self.functionalize_model()
-    #     return (device, ddp)

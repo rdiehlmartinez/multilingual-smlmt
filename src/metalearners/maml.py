@@ -6,6 +6,8 @@ Implements Model Agnostic Meta Learning: https://arxiv.org/abs/1703.03400
 import time
 import itertools
 import logging
+import copy
+
 # custom higher version
 import lib.higher.higher as higher
 
@@ -305,63 +307,119 @@ class MAML(BaseMetaLearner):
 
     def run_evaluation(
         self, 
-        support_batch, 
-        evaluation_dataloader,
-        num_classes,
+        finetune_dataloader: torch.utils.data.DataLoader,
+        evaluation_dataloader: torch.utils.data.DataLoader,
+        task_type: str, 
+        task_head_init_method: str,
+        num_classes: int,
     ): 
         """
+        Runs finetuning of the model on the support set data stored in the support_dataloader,
+        and then evaluates the model on the evaluation_dataloader.
+
+        Args: 
+            * finetune_dataloader: A torch.utils.data.DataLoader object containing the data for 
+                finetuning the pre-trained model for a given NLU task
+            * evaluation_dataloader: A torch.utils.data.DataLoader object containing the evaluation
+                set data for a given NLU task
+            * task_type: A string indicating the type of task (e.g. 'classification', 'qa', etc.)
+            * task_head_init_method: A string indicating the method used to initialize the task
+                head weights
+            * num_classes: An integer indicating the number of classes in the task
+
         """
 
-         ### Initializing the task head used for the downstream NLU task
-        support_batch = move_to_device(support_batch, self.base_device)
+        if 'protomaml' in task_head_init_method:
+            task_init_batch = move_to_device(next(iter(support_dataloader)), self.base_device)
+
         init_kwargs = self.get_task_init_kwargs(
-            'classification',
-            self.lm_head_init_method,
+            task_type,
+            task_head_init_method,
             num_classes,
-            data_batch=support_batch if 'protomaml' in self.lm_head_init_method else None,
+            data_batch=task_init_batch if 'protomaml' in self.lm_head_init_method else None,
         )
         task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
 
-        eval_predictions, total_eval_loss = self._adapt_params(
-            [support_batch],
-            None, 
-            task_head_weights,
-            self.num_inner_loop_steps,
-            evaluation=True,
-            eval_dataloader=evaluation_dataloader
+
+        finetune_model = copy.deepcopy(self.base_model)
+        # NOTE: We set up an optimizer to train the finetuned_model on the finetune data 
+        # (i.e. the support set data) -- we do not use the optimizer that is used to train the
+        # base_model on the meta-training data.
+        finetune_model_params_groups = itertools.cycle(
+            # We both optimize the finetune model, along with the task head weights 
+            self.innerloop_optimizer_param_groups(base_model_override=finetune_model),
+            [{
+                'params': task_head_weights.values(),
+                'lr': self.classifier_lr,
+            }]
         )
+        finetune_optimizer = AdamW(finetune_model_params_groups)
+        finetune_optimizer.zero_grad()
 
+        patience = 3
+        min_train_loss = None
 
-                # # Running full evaluation
+        # Finetuning the model on the data in the finetune dataloader 
+        finetune_model.train()
+        for finetune_batch in finetune_dataloader:
+            finetune_batch = move_to_device(finetune_batch, self.base_device)
 
-                # eval_predictions = []
-                # total_eval_loss = 0.0
-                # total_eval_samples = 0
+            outputs = finetune_model(
+                input_ids=finetune_batch['input_ids'],
+                attention_mask=finetune_batch['attention_mask']
+            )
 
-                # for eval_batch in eval_dataloader: 
-                #     eval_batch = move_to_device(eval_batch, self.base_device)
+            _, loss = self._compute_task_loss(
+                outputs,
+                finetune_batch,
+                task_head_weights, 
+                task_type=task_type
+            )
 
-                #     eval_outputs = flearner(
-                #         input_ids=eval_batch['input_ids'],
-                #         attention_mask=eval_batch['attention_mask'],
-                #     )
+            loss.backward()
+            finetune_optimizer.step()
+            finetune_optimizer.zero_grad()
 
-                #     eval_logits, eval_loss = self._compute_task_loss(
-                #         eval_outputs, 
-                #         eval_batch,
-                #         task_head_weights,
-                #         task_type='classification'
-                #     )
+            # We need to train the model to convergence on the finetune data, so we don't
+            # break out of the loop until we've gone through all the batches in the dataloader
+            # (i.e. we don't use the early stopping mechanism that is used in the inner loop)
+            
+            if min_train_loss is None or loss < min_train_loss:
+                min_train_loss = loss
+                patience = 3
 
-                #     eval_predictions.extend(torch.argmax(eval_logits, dim=-1).tolist())
+            if loss > min_train_loss: 
+                patience -= 1
+                if patience == 0:
+                    break
+        
+        # Running full evaluation
 
-                #     batch_size = eval_logits.size(0)
-                #     total_eval_loss += eval_loss.item() * batch_size # loss is averaged across batch
-                #     total_eval_samples += batch_size 
+        eval_predictions = []
+        total_eval_loss = 0.0
+        total_eval_samples = 0
 
-                # total_eval_loss /= total_eval_samples
+        for eval_batch in eval_dataloader: 
+            eval_batch = move_to_device(eval_batch, self.base_device)
 
-                # return (eval_predictions, total_eval_loss)
+            eval_outputs = finetune_model(
+                input_ids=eval_batch['input_ids'],
+                attention_mask=eval_batch['attention_mask'],
+            )
 
+            eval_logits, eval_loss = self._compute_task_loss(
+                eval_outputs, 
+                eval_batch,
+                task_head_weights,
+                task_type=task_type
+            )
+
+            eval_predictions.extend(torch.argmax(eval_logits, dim=-1).tolist())
+
+            batch_size = eval_logits.size(0)
+            total_eval_loss += eval_loss.item() * batch_size # loss is averaged across batch
+            total_eval_samples += batch_size 
+
+        total_eval_loss /= total_eval_samples
 
         return (eval_predictions, total_eval_loss)

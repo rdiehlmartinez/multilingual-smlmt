@@ -24,12 +24,7 @@ class NLUTaskDataGenerator(metaclass=abc.ABCMeta):
         """
         Base class for generators that yield NLUDataset classes. Requires children to be iterators.
         """
-        # When using the platipus meta-learning method, we need to generate a language task for
-        # model adaptation - thus we need to store the config specifying language task generation
-        if config.get("LEARNER", "method") == "platipus": 
-            self.language_task_kwargs = dict(config.items("LANGUAGE_TASK"))
-        else: 
-            self.language_task_kwargs = None
+        pass
 
     @property
     @abc.abstractmethod
@@ -41,6 +36,12 @@ class NLUTaskDataGenerator(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def task_type(self) -> str:
         """ The type of NLU task (e.g. classifiation)"""
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def task_head_init_method(self) -> str:
+        """ The method for initializing the task-specific head of the model """
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -87,35 +88,6 @@ class NLUDataset(IterableDataset, metaclass=abc.ABCMeta):
             * input_ids (list): List of input tokens
         """
         raise NotImplementedError()
-
-    def generate_N_K_samples(self, N: int, K: int) -> Dict[str, torch.Tensor]: 
-        """ 
-        Generates an N-way K-shot support set for a given NLU task that is used to finetune a
-        pretrained LM model on a given NLU task.
-
-        Args: 
-            * N (int): Number of classes in the support set
-            * K (int): Number of samples per class in the support set
-        
-        Returns: 
-            * batch (dict) of collated data that corresponds to a support set for a given NLU task. 
-                See base_collate_fn for more details on the structure of the batch.
-        """
-
-        support_set = defaultdict(list)
-
-        with open(self.file_path, 'r') as f:
-            for line in f: 
-                label_id, input_ids = self.preprocess_line(line)
-
-                if len(support_set[label_id]) < K:
-                    support_set[label_id].append(input_ids)
-
-                if len(support_set) == N * K:
-                    break
-                
-        return nlu_collate(support_set)
-
 
     def __iter__(self): 
         """ Reads over file and preprocesses each of the lines """
