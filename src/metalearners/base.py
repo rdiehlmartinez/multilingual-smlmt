@@ -400,10 +400,10 @@ class BaseMetaLearner(BaseLearner):
 
     ### Base setup functionality for meta learning models
 
-    @property 
     def innerloop_optimizer_param_groups(
         self,
-        base_model_override: torch.nn.Module = None
+        base_model_override: torch.nn.Module = None, 
+        cast_lr_to_float: bool = False
     ) -> Iterator[Dict[str, torch.nn.Parameter]]: 
         """
         Returns the parameter groups that are passed to the innerloop (diferentiable) optimizer.
@@ -448,13 +448,11 @@ class BaseMetaLearner(BaseLearner):
 
             param_groups.append({
                 'params': param,
-                'lr': layer_lr,
+                'lr': layer_lr.item() if cast_lr_to_float else layer_lr,
             })
 
         return param_groups
             
-
-    @property
     def outerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
         """
         Returns the parameter groups that are passed to the outerloop optimizer.

@@ -16,6 +16,7 @@ import os
 from transformers import AdamW, get_constant_schedule_with_warmup
 
 import torch.multiprocessing as mp
+from torch.optim.lr_scheduler import OneCycleLR
 
 from .models import XLMR
 from .metalearners import MAML, BaselineLearner
@@ -87,9 +88,33 @@ class Problyglot(object):
         # setting meta learning rate 
         self.meta_lr = config.getfloat("PROBLYGLOT", "meta_learning_rate", fallback=1e-3)
 
+        # setting scheduling protocol for meta learning rate
+        self.meta_lr_scheduler_method = config.get(
+            "PROBLYGLOT",
+            "meta_lr_scheduler_method",
+            fallback=None
+        )
+
         # setting learner 
         self.learner_method = self.config.get("LEARNER", "method")
         self.learner = self.load_learner(self.learner_method)
+
+        # setting meta training and evaluation parameters
+        self.num_tasks_per_iteration = self.config.getint(
+            "PROBLYGLOT",
+            "num_tasks_per_iteration",
+            fallback=1
+        )
+        self.eval_every_n_iteration = self.config.getint(
+            "PROBLYGLOT",
+            "eval_every_n_iteration",
+            fallback=0
+        )
+        self.max_task_batch_steps = self.config.getint(
+            "PROBLYGLOT",
+            "max_task_batch_steps",
+            fallback=1
+        )
 
         if self.use_wandb:
             # setting up metrics for logging to wandb
@@ -252,31 +277,49 @@ class Problyglot(object):
         exit(124)
 
 
-    def setup_meta_optimizer(self) -> Optimizer:
+    def setup_meta_optimizer(self) -> None:
         """
-        Helper function for setting up meta optimizer.
+        Helper function for setting up meta optimizer and optionally an associated learning 
+        rate scheduler.
+        """
+        self.meta_optimizer = AdamW(self.learner.outerloop_optimizer_param_groups(), lr=self.meta_lr)
+        self.meta_optimizer.zero_grad()
 
-        Returns: 
-            * meta_optimizer (Optimizer): meta optimizer to be used for meta learning
-        """
-        meta_optimizer = AdamW(self.learner.outerloop_optimizer_param_groups, lr=self.meta_lr)
-        meta_optimizer.zero_grad()
-        return meta_optimizer
+        if self.meta_lr_scheduler_method is not None: 
+            if self.meta_lr_scheduler_method == "linear":
+                self.meta_lr_scheduler = OneCycleLR(
+                    self.meta_optimizer,
+                    max_lr=self.meta_lr,
+                    total_steps=self.max_task_batch_steps,
+                    pct_start=0.1,
+                )
+            else: 
+                raise Exception(
+                    f"Invalid meta learning rate scheduler method: {self.meta_lr_scheduler_method}"
+                )
+        else: 
+            self.meta_lr_scheduler = None
+
 
     def meta_optimizer_step(self, grad_norm_constant: int) -> None:
         """
         Helper function for performing meta optimization step. Normalizes the gradients by the
-        value of grad_norm_constant and performs a step on the meta optimizer.
+        value of grad_norm_constant and performs a step on the meta optimizer. Optionally performs
+        a step on the meta learning rate scheduler.
 
         Args: 
             * grad_norm_constant (int): value to normalize gradients by
         """
 
-        for param_group in self.learner.outerloop_optimizer_params:
+        for param_group in self.learner.outerloop_optimizer_param_groups():
             for param in param_group['params']:
-                param.grad /= num_tasks_per_iteration
+                param.grad /= grad_norm_constant
 
         self.meta_optimizer.step()
+
+        if self.meta_lr_scheduler is not None:
+            self.meta_lr_scheduler.step()
+
         self.meta_optimizer.zero_grad()
 
     def __call__(self) -> None: 
@@ -285,7 +328,7 @@ class Problyglot(object):
         on data stored in self.meta_dataloader
         """
 
-        self.meta_optimizer = self.setup_meta_optimizer()
+        self.setup_meta_optimizer()
 
         ### --------- Evaluation Mode (will return early) ---------- 
         if not hasattr(self, "meta_dataset"):
@@ -303,57 +346,40 @@ class Problyglot(object):
 
         logger.info("Running problyglot in training mode")
 
-        ### reading in training configs
-
-        num_tasks_per_iteration = self.config.getint(
-            "PROBLYGLOT",
-            "num_tasks_per_iteration",
-            fallback=1
-        )
-        eval_every_n_iteration = self.config.getint(
-            "PROBLYGLOT",
-            "eval_every_n_iteration",
-            fallback=0
-        )
-        max_task_batch_steps = self.config.getint(
-            "PROBLYGLOT",
-            "max_task_batch_steps",
-            fallback=1
-        )
-
         ### If using n GPUs we launch n processes that run the run_inner_loop_mp function 
 
         # If using multiple GPUs
         if self.use_multiple_gpus:
+            raise NotImplementedError
             
-            if num_tasks_per_iteration % num_gpus != 0:
-                error_msg = "Num tasks per iteration has to be dividable by num_pus!"
-                logger.exception(error_msg)
-                raise Exception(error_msg)
+            # if num_tasks_per_iteration % num_gpus != 0:
+            #     error_msg = "Num tasks per iteration has to be dividable by num_pus!"
+            #     logger.exception(error_msg)
+            #     raise Exception(error_msg)
 
-            logger.info(f"Running data parallel training with {num_gpus} workers")
-            spawn_context = mp.get_context('spawn')
+            # logger.info(f"Running data parallel training with {num_gpus} workers")
+            # spawn_context = mp.get_context('spawn')
 
-            data_queue = spawn_context.Queue()
-            loss_queue = spawn_context.Queue()
+            # data_queue = spawn_context.Queue()
+            # loss_queue = spawn_context.Queue()
 
-            step_optimizer = spawn_context.Event()
+            # step_optimizer = spawn_context.Event()
 
-            self.gpu_workers = []
-            for rank in range(num_gpus):
-                p = spawn_context.Process(
-                    target=self.learner.run_inner_loop_mp,
-                    args=(
-                        rank,
-                        num_gpus,
-                        data_queue,
-                        loss_queue,
-                        step_optimizer, 
-                        num_tasks_per_iteration,
-                    )   
-                )
-                p.start()
-                self.gpu_workers.append(p)
+            # self.gpu_workers = []
+            # for rank in range(num_gpus):
+            #     p = spawn_context.Process(
+            #         target=self.learner.run_inner_loop_mp,
+            #         args=(
+            #             rank,
+            #             num_gpus,
+            #             data_queue,
+            #             loss_queue,
+            #             step_optimizer, 
+            #             num_tasks_per_iteration,
+            #         )   
+            #     )
+            #     p.start()
+            #     self.gpu_workers.append(p)
 
         ### Setting up tracking variables and w&b metrics  
 
@@ -399,21 +425,21 @@ class Problyglot(object):
                 task_name, support_batch_list, query_batch = task_batch
 
                 task_loss = self.learner.run_inner_loop(support_batch_list, query_batch)            
-                task_loss = task_loss/num_tasks_per_iteration # normalizing loss 
+                task_loss = task_loss/self.num_tasks_per_iteration # normalizing loss 
                 task_batch_loss += task_loss
 
-            if ((task_batch_idx + 1) % num_tasks_per_iteration == 0):
+            if ((task_batch_idx + 1) % self.num_tasks_per_iteration == 0):
                 #### NOTE: Just finished a batch of tasks 
 
                 if self.use_multiple_gpus: 
                     while True:
                         # Waiting for all processes to finish computing gradients
                         time.sleep(1)
-                        if loss_queue.qsize() == num_tasks_per_iteration:
+                        if loss_queue.qsize() == self.num_tasks_per_iteration:
                             break
 
                     ## Multi GPU: gathering up all of the task losses
-                    for _ in range(num_tasks_per_iteration):
+                    for _ in range(self.num_tasks_per_iteration):
 
                         loss = loss_queue.get()[0]
                         task_batch_loss += loss
@@ -427,7 +453,7 @@ class Problyglot(object):
                         time.sleep(1)
                 else: 
                     # single GPU: taking optimizer step
-                    self.meta_optimizer_step()
+                    self.meta_optimizer_step(grad_norm_constant=self.num_tasks_per_iteration)
 
                 ### Logging out training results
                 logger.info(f"No. batches of tasks processed: {self.num_task_batches}")
@@ -453,13 +479,15 @@ class Problyglot(object):
                 task_batch_loss = 0 
 
                 ### possibly run evaluation of the model
-                if (eval_every_n_iteration and self.num_task_batches % eval_every_n_iteration == 0):
+                if (self.eval_every_n_iteration 
+                    and self.num_task_batches % self.eval_every_n_iteration == 0
+                ):
                     if not hasattr(self, "evaluator"):
                         logger.warning("Evaluation missing in config - skipping evaluator run")
                     else: 
                         self.evaluator.run(self.learner, num_task_batches=self.num_task_batches)
 
-                if (self.num_task_batches % max_task_batch_steps == 0):
+                if (self.num_task_batches % self.max_task_batch_steps == 0):
                     # NOTE: stop training if we've done max_task_batch_steps global update steps
                     break
 

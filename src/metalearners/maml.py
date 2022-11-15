@@ -13,6 +13,7 @@ import lib.higher.higher as higher
 
 import torch
 import torch.distributed as dist
+from transformers import AdamW
 
 from .base import BaseMetaLearner
 from ..taskheads import TaskHead
@@ -24,7 +25,7 @@ from typing import Dict, Tuple, List, Dict, Iterator, Any, Union
 logger = logging.getLogger(__name__)
 
 class MAML(BaseMetaLearner):
-    def __init__(self, **kwargs,) -> None:
+    def __init__(self, **kwargs) -> None:
         """
         MAML implements a basic type of BaseMetaLearner.
         The core idea is to train a model using a two-loop approach:
@@ -69,11 +70,11 @@ class MAML(BaseMetaLearner):
 
         # Getting lrs for each parameter group
         inner_loop_optimizer_lrs = {'lr': []}
-        for param_group in self.innerloop_optimizer_param_groups: 
+        for param_group in self.innerloop_optimizer_param_groups(): 
             inner_loop_optimizer_lrs['lr'].append(param_group['lr'])
 
         inner_loop_optimizer_params = [
-            {'params': pg['params']} for pg in self.innerloop_optimizer_param_groups
+            {'params': pg['params']} for pg in self.innerloop_optimizer_param_groups()
         ]
 
         # Setting up the inner loop optimizer; note that we need pass in the learning rates 
@@ -308,60 +309,70 @@ class MAML(BaseMetaLearner):
     def run_evaluation(
         self, 
         finetune_dataloader: torch.utils.data.DataLoader,
-        evaluation_dataloader: torch.utils.data.DataLoader,
+        eval_dataloader: torch.utils.data.DataLoader,
         task_type: str, 
         task_head_init_method: str,
         num_classes: int,
-    ): 
+    ) -> Tuple[List[int], float]:
         """
         Runs finetuning of the model on the support set data stored in the support_dataloader,
-        and then evaluates the model on the evaluation_dataloader.
+        and then evaluates the model on the eval_dataloader.
 
         Args: 
             * finetune_dataloader: A torch.utils.data.DataLoader object containing the data for 
                 finetuning the pre-trained model for a given NLU task
-            * evaluation_dataloader: A torch.utils.data.DataLoader object containing the evaluation
+            * eval_dataloader: A torch.utils.data.DataLoader object containing the evaluation
                 set data for a given NLU task
             * task_type: A string indicating the type of task (e.g. 'classification', 'qa', etc.)
             * task_head_init_method: A string indicating the method used to initialize the task
                 head weights
             * num_classes: An integer indicating the number of classes in the task
 
+        Returns:
+            * eval_predictions: A list of integers indicating the predicted class for each sample
+                in the evaluation set
+            * eval_loss: A float indicating the loss of the model on the evaluation set 
         """
 
         if 'protomaml' in task_head_init_method:
-            task_init_batch = move_to_device(next(iter(support_dataloader)), self.base_device)
+            task_init_batch = move_to_device(next(iter(finetune_dataloader)), self.base_device)
 
-        init_kwargs = self.get_task_init_kwargs(
-            task_type,
-            task_head_init_method,
-            num_classes,
-            data_batch=task_init_batch if 'protomaml' in self.lm_head_init_method else None,
-        )
-        task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
-
+        # Setting up the task head for the task
+        with torch.no_grad(): 
+            init_kwargs = self.get_task_init_kwargs(
+                task_type,
+                task_head_init_method,
+                num_classes,
+                data_batch=task_init_batch if 'protomaml' in task_head_init_method else None,
+            )
+            task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
 
         finetune_model = copy.deepcopy(self.base_model)
         # NOTE: We set up an optimizer to train the finetuned_model on the finetune data 
         # (i.e. the support set data) -- we do not use the optimizer that is used to train the
         # base_model on the meta-training data.
-        finetune_model_params_groups = itertools.cycle(
+        finetune_model_params_groups = itertools.chain(
             # We both optimize the finetune model, along with the task head weights 
-            self.innerloop_optimizer_param_groups(base_model_override=finetune_model),
+            self.innerloop_optimizer_param_groups(
+                base_model_override=finetune_model,
+                cast_lr_to_float=True
+            ),
             [{
                 'params': task_head_weights.values(),
                 'lr': self.classifier_lr,
             }]
         )
-        finetune_optimizer = AdamW(finetune_model_params_groups)
-        finetune_optimizer.zero_grad()
 
-        patience = 3
+        finetune_optimizer = AdamW(finetune_model_params_groups)
+
+        patience = 5
         min_train_loss = None
 
         # Finetuning the model on the data in the finetune dataloader 
         finetune_model.train()
-        for finetune_batch in finetune_dataloader:
+        for finetune_batch in itertools.cycle(finetune_dataloader):
+            finetune_optimizer.zero_grad()
+
             finetune_batch = move_to_device(finetune_batch, self.base_device)
 
             outputs = finetune_model(
@@ -378,7 +389,8 @@ class MAML(BaseMetaLearner):
 
             loss.backward()
             finetune_optimizer.step()
-            finetune_optimizer.zero_grad()
+
+            # TODO: BETTER EARLY STOPPING
 
             # We need to train the model to convergence on the finetune data, so we don't
             # break out of the loop until we've gone through all the batches in the dataloader
@@ -394,6 +406,7 @@ class MAML(BaseMetaLearner):
                     break
         
         # Running full evaluation
+        finetune_model.eval()
 
         eval_predictions = []
         total_eval_loss = 0.0
