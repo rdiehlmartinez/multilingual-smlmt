@@ -216,7 +216,7 @@ def main():
 
     config = ConfigParser()
     config.add_section('XNLI')
-    config.set('XNLI', 'root_path', '../../rds-personal-3CBQLhZjXbU/problyglot_data/xtreme/download/xnli')
+    config.set('XNLI', 'root_path', '../../rds-personal-3CBQLhZjXbU/data/xtreme/download/xnli')
     config.set('XNLI', 'evaluation_partition', "dev")
     config.set('XNLI', 'k', '16')
 

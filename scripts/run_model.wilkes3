@@ -10,7 +10,7 @@
 
 #! sbatch directives begin here ###############################
 #! Name of the job:
-#SBATCH -J problyglot
+#SBATCH -J multilingual-smlmt
 #! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
 #SBATCH -A BUTTERY-SL3-GPU
 #! How many whole nodes should be allocated?

@@ -29,7 +29,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 logger = logging.getLogger(__name__)
 
-class Problyglot(object):
+class Pipeline(object):
     """
     Orchestrates model loading, training and evaluation using a specific type of (meta-)learner.
     """
@@ -53,7 +53,7 @@ class Problyglot(object):
         self.mode = config.get("EXPERIMENT", "mode", fallback='train')
         if self.mode not in ['train', 'inference']:
             raise Exception(
-                f"Invalid problyglot run mode: {self.mode} - must be 'train' or 'inference'"
+                f"Invalid pipeline run mode: {self.mode} - must be 'train' or 'inference'"
             )
         
         # whether to log out information to w&b
@@ -76,9 +76,9 @@ class Problyglot(object):
             )
 
         # Setting device 
-        self.base_device = config.get("PROBLYGLOT", "device", fallback=DEFAULT_DEVICE)
+        self.base_device = config.get("PIPELINE", "device", fallback=DEFAULT_DEVICE)
         self.use_multiple_gpus = self.base_device == torch.device("cuda") and num_gpus > 1
-        logger.info(f"Running problyglot on device: {self.base_device}")
+        logger.info(f"Running pipeline on device: {self.base_device}")
         if self.base_device == torch.device("cuda"):
             logger.info(f"Number of GPUs available: {num_gpus}")
 
@@ -88,17 +88,17 @@ class Problyglot(object):
 
         # setting meta training and evaluation parameters
         self.num_tasks_per_iteration = self.config.getint(
-            "PROBLYGLOT",
+            "PIPELINE",
             "num_tasks_per_iteration",
             fallback=1
         )
         self.eval_every_n_iteration = self.config.getint(
-            "PROBLYGLOT",
+            "PIPELINE",
             "eval_every_n_iteration",
             fallback=0
         )
         self.max_task_batch_steps = self.config.getint(
-            "PROBLYGLOT",
+            "PIPELINE",
             "max_task_batch_steps",
             fallback=1
         )
@@ -120,7 +120,7 @@ class Problyglot(object):
         self.learner = self.load_learner(self.learner_method)
 
         # setting meta learning rate 
-        self.meta_lr = config.getfloat("PROBLYGLOT", "meta_learning_rate", fallback=1e-3)
+        self.meta_lr = config.getfloat("PIPELINE", "meta_learning_rate", fallback=1e-3)
 
         # setting up the optimizer and learning rate scheduler for meta learning
         self.meta_optimizer = self.setup_meta_optimizer()
@@ -263,7 +263,7 @@ class Problyglot(object):
         """
 
         meta_lr_scheduler_method = self.config.get(
-            "PROBLYGLOT",
+            "PIPELINE",
             "meta_lr_scheduler_method",
             fallback=None
         )
@@ -377,7 +377,7 @@ class Problyglot(object):
         ### --------- Inference Mode (no model training) ---------- 
 
         if self.mode == "inference":
-            logger.info("Running problygot in inference-only mode")
+            logger.info("Running pipeline in inference-only mode")
 
             if not hasattr(self, "evaluator"):
                 logger.error("Need to specify an evaluator to run in inference-only mode")
@@ -389,7 +389,7 @@ class Problyglot(object):
 
         ### -------------------- Training Mode -------------------- 
 
-        logger.info("Running problyglot in training mode")
+        logger.info("Running pipeline in training mode")
 
         ### Setting up tracking variables and w&b metrics  
 
@@ -412,7 +412,7 @@ class Problyglot(object):
                         step_metric="num_task_batches"
                     )
 
-        if self.config.getboolean("PROBLYGLOT", "run_initial_eval", fallback=True) and \
+        if self.config.getboolean("PIPELINE", "run_initial_eval", fallback=True) and \
             self.num_task_batches == 0:
             # num_task_batches would only ever not be 0 if we're resuming training because of 
             # previous timeout failure, in that case don't run initial eval

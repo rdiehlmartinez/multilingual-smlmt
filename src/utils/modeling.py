@@ -1,5 +1,5 @@
 __author__ = 'Richard Diehl Martinez'
-""" Utils for modeling aspects of problyglot """
+""" Utils for modeling and training"""
 
 import torch
 

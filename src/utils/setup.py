@@ -58,7 +58,7 @@ def setup_wandb(config: ConfigParser, run_id: str, resume_training: bool) -> Non
     """
     if config.getboolean('EXPERIMENT', 'use_wandb', fallback=True):
         dict_config = json.loads(json.dumps(config._sections))
-        wandb.init(project=config.get("EXPERIMENT", "name"),
+        wandb.init(project='Multilingual-SMLMT',
                    entity="problyglot",
                    config=dict_config,
                    id=run_id,

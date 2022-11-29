@@ -1,5 +1,5 @@
 __author__ = 'Richard Diehl Martinez'
-""" Entry point for launching problyglot """
+""" Entry point for launching the model training and evaluation pipeline """
 
 import argparse
 import os
@@ -7,7 +7,7 @@ import random
 import signal
 
 from src.utils import setup
-from src.problyglot import Problyglot
+from src.Pipeline import Pipeline
 
 parser = argparse.ArgumentParser(description="Parses config files passed in via CLI")
 parser.add_argument("Path", metavar='path', type=str, help='path to the config file')
@@ -35,15 +35,15 @@ def main():
     # Setting up logging, config read in and seed setting
     config = setup(args.Path, run_id, resume_num_task_batches)
     
-    # Initializing problyglot with configuration and options
-    problyglot = Problyglot(config, resume_num_task_batches)
+    # Initializing the modeling pipeline with configuration and options
+    pipeline = Pipeline(config, resume_num_task_batches)
 
     # setting up timeout handler - called if the program receives a SIGINT either from the user
     # or from SLURM if it is about to timeout
-    signal.signal(signal.SIGINT, problyglot.timeout_handler)
+    signal.signal(signal.SIGINT, pipeline.timeout_handler)
 
     # launching training or eval script
-    problyglot()
+    pipeline()
 
     if os.path.exists(run_file_path):
         os.remove(run_file_path)
