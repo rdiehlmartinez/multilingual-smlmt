@@ -1,17 +1,24 @@
 __author__ = 'Richard Diehl Martinez'
-""" Utils for modeling aspects of problyglot """
+""" Utils for modeling and training"""
 
 import torch
-import typing
 
-def kl_divergence_gaussians(p: typing.List[torch.Tensor], q: typing.List[torch.Tensor]):
+# typing imports
+from typing import List
+
+def kl_divergence_gaussians(p: List[torch.Tensor], q: List[torch.Tensor]) -> torch.Tensor:
     """Calculate KL divergence between 2 diagonal Gaussian
 
     Copied verbatim from: 
     https://github.com/cnguyen10/few_shot_meta_learning
 
-    Args: each parameter is list with 1st half as mean, and the 2nd half is log_std
-    Returns: KL divergence
+    Args: 
+        * p (List[torch.Tensor]): List of tensors containing the mean and log variance of the
+            first Gaussian distribution
+        * q (List[torch.Tensor]): List of tensors containing the mean and log variance of the 
+            second Gaussian distribution
+    Returns:
+        * kl_div (torch.Tensor): Tensor containing the KL divergence
     """
     assert len(p) == len(q)
 

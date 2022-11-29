@@ -160,3 +160,8 @@ oscar/
 xtreme/
 *.xz
 *.pkl
+
+# Don't include log files 
+*.out
+machine.file.*
+tmp/

@@ -10,7 +10,6 @@ class BaseModel(metaclass=abc.ABCMeta):
     Base interface for model classes. We primarily define these so that if in the future we do not 
     want to use a torch.nn.Module we can continue to ensure models share a similar interface.
 
-
     One important NOTE - the base_model should contain parameters that are specified names 
     according to what layer the parameter is in (e.g. 'attention.layer.1'). This is because 
     we store per-layer parameter weights that are used for the maml and platipus meta-learning 
@@ -30,6 +29,12 @@ class BaseModel(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def hidden_dim(self):
         """ Return the hidden dimension size of the model """
+        raise NotImplementedError()
+
+    @property
+    @abc.abstractmethod
+    def trainable_layers(self):
+        """ Return the layers that are trainable (identified by layer number) """
         raise NotImplementedError()
 
     @abc.abstractmethod

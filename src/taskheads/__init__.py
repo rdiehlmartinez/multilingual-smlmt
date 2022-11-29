@@ -1,2 +1,3 @@
-from .classification import ClassificationHead
 from .base import TaskHead
+
+from .classification import ClassificationHead

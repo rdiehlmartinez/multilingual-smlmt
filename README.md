@@ -1,7 +1,15 @@
-# Problyglot : A framework for Probabilistic Graphical Language Training
+# Multilingual SMLMT
 
-Problyglot is a methodology for how to train a model using a probabilistic meta-learning training approach. The main idea is to train a language model as multi-lingual model, by forcing the model at each training step to sample weights that will help it solve a language modeling task in a specific language. Through the training process, the hope is that the model will learn to select weights that are 'useful' for a given language and which in turn should be a good starting-off point for the model to be fine-tuned on a downstream NLU task for any language. 
 
-The entry point to the model is run_model which expects to be passed in a config file. 
+This library provides functionality for training a multi-lingual language model via meta learning. 
+The tasks that are used to meta learn the model are variants of the Subset Masked Language Modeling
+Tasks (SMLMT) as defined initially [Bansal et al.](https://arxiv.org/pdf/2009.08445.pdf). 
 
-As a baseline to the probabilistic MAML approach we also implement a standard MAML approach, as well as a baseline model that simply does normal multi-lingual masked language modeling. 
+The contributions of this library are in the form of 1) a dataset class that given text files 
+containing unlabeled text samples in different languages can generate multi-lingual SMLMT tasks,
+and 2) a framework for training a language model thorugh a meta-learning mutli-level optimization 
+approach on the generated SMLMT tasks, 3) a pipeline for evaluating the performance of the model 
+on a set of NLU tasks. 
+
+To run training and or evaluation of a language model via smlmt training, you must specify the 
+desired configurations in a config file stored under the configs directory. 
