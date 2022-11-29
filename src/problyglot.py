@@ -316,14 +316,6 @@ class Problyglot(object):
 
         self.meta_dataset.shutdown()
 
-        # Shut down workers if using multiple GPUs
-        if hasattr(self, "gpu_workers") and self.use_multiple_gpus: 
-            logger.info("Shutting down GPU workers used for model training")
-            for p in self.gpu_workers:
-                p.terminate()
-                time.sleep(1)
-                p.join()
-
     def timeout_handler(self, signum, frame) -> None:
         """
         Gracefully handles early termination signals. Catches termination signals sent from  
@@ -399,41 +391,6 @@ class Problyglot(object):
 
         logger.info("Running problyglot in training mode")
 
-        ### If using n GPUs we launch n processes that run the run_inner_loop_mp function 
-
-        # If using multiple GPUs
-        if self.use_multiple_gpus:
-            raise NotImplementedError
-            
-            # if num_tasks_per_iteration % num_gpus != 0:
-            #     error_msg = "Num tasks per iteration has to be dividable by num_pus!"
-            #     logger.exception(error_msg)
-            #     raise Exception(error_msg)
-
-            # logger.info(f"Running data parallel training with {num_gpus} workers")
-            # spawn_context = mp.get_context('spawn')
-
-            # data_queue = spawn_context.Queue()
-            # loss_queue = spawn_context.Queue()
-
-            # step_optimizer = spawn_context.Event()
-
-            # self.gpu_workers = []
-            # for rank in range(num_gpus):
-            #     p = spawn_context.Process(
-            #         target=self.learner.run_inner_loop_mp,
-            #         args=(
-            #             rank,
-            #             num_gpus,
-            #             data_queue,
-            #             loss_queue,
-            #             step_optimizer, 
-            #             num_tasks_per_iteration,
-            #         )   
-            #     )
-            #     p.start()
-            #     self.gpu_workers.append(p)
-
         ### Setting up tracking variables and w&b metrics  
 
         # counter tracks loss over an entire batch of tasks  
@@ -450,8 +407,10 @@ class Problyglot(object):
                 # for inner layers we need to track lr per layer
                 num_layers = len(self.learner.inner_layers_lr)
                 for layer_idx in range(num_layers):
-                    wandb.define_metric(f"inner_layer_{layer_idx}_lr",
-                                        step_metric="num_task_batches")
+                    wandb.define_metric(
+                        f"inner_layer_{layer_idx}_lr",
+                        step_metric="num_task_batches"
+                    )
 
         if self.config.getboolean("PROBLYGLOT", "run_initial_eval", fallback=True) and \
             self.num_task_batches == 0:
@@ -479,36 +438,13 @@ class Problyglot(object):
                 task_loss = task_loss/self.num_tasks_per_iteration # normalizing loss 
                 task_batch_loss += task_loss
        
-            if ((task_batch_idx + 1) % self.num_tasks_per_iteration == 0):
-                #### NOTE: Just finished a batch of tasks 
+            if ((task_batch_idx + 1) % self.num_tasks_per_iteration == 0):        
+                ##### NOTE: Just finished a batch of tasks -- taking a global (meta) update step
 
-                if self.use_multiple_gpus: 
-                    raise NotImplementedError
-
-                    # while True:
-                    #     # Waiting for all processes to finish computing gradients
-                    #     time.sleep(1)
-                    #     if loss_queue.qsize() == self.num_tasks_per_iteration:
-                    #         break
-
-                    # ## Multi GPU: gathering up all of the task losses
-                    # for _ in range(self.num_tasks_per_iteration):
-
-                    #     loss = loss_queue.get()[0]
-                    #     task_batch_loss += loss
-                                                
-                ##### NOTE: Taking a global (meta) update step
                 self.num_task_batches += 1
-                if self.use_multiple_gpus: 
-                    raise NotImplementedError
 
-                    # # informing/waiting for workers to all take an optimizer step 
-                    # step_optimizer.set()
-                    # while step_optimizer.is_set():
-                    #     time.sleep(1)
-                else: 
-                    # single GPU: taking optimizer step
-                    self.meta_optimizer_step(grad_norm_constant=self.num_tasks_per_iteration)
+                # single GPU: taking optimizer step
+                self.meta_optimizer_step(grad_norm_constant=self.num_tasks_per_iteration)
 
                 ### Logging out training results
                 logger.info(f"No. batches of tasks processed: {self.num_task_batches}")
@@ -517,18 +453,23 @@ class Problyglot(object):
                     
                     if self.learner_method != "baseline": 
                         # wandb logging info for any meta-learner
-                        wandb.log({"classifier_lr": self.learner.classifier_lr.item()},
-                                   commit=False
-                                  )
+                        wandb.log(
+                            {"classifier_lr": self.learner.classifier_lr.item()},
+                            commit=False
+                        )
 
                         for layer_num, layer in self.learner.inner_layers_lr.items():
-                                wandb.log({f"inner_layer_{layer_num}_lr": layer.item()}, 
-                                          commit=False
-                                         )
+                                wandb.log(
+                                    {f"inner_layer_{layer_num}_lr": layer.item()}, 
+                                    commit=False
+                                )
 
-                    wandb.log({"train.loss": task_batch_loss,
-                               "num_task_batches": self.num_task_batches},
-                             )
+                    wandb.log(
+                        {
+                            "train.loss": task_batch_loss,
+                            "num_task_batches": self.num_task_batches
+                        },
+                    )
 
                 task_batch_loss = 0 
 
