@@ -244,7 +244,7 @@ class Problyglot(object):
         )
 
         if self.checkpoint is not None:
-            learner.load_state_dict(checkpoint['learner_state_dict'], strict=False)
+            learner.load_state_dict(self.checkpoint['learner_state_dict'], strict=False)
         else:
             logger.info("No checkpoint used - learning from scratch")
 
@@ -263,7 +263,7 @@ class Problyglot(object):
         meta_optimizer.zero_grad()
 
         if self.checkpoint is not None:
-            meta_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            meta_optimizer.load_state_dict(self.checkpoint['optimizer_state_dict'])
         return meta_optimizer
 
 
@@ -291,7 +291,7 @@ class Problyglot(object):
                 )
 
             if self.checkpoint is not None:
-                meta_lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                meta_lr_scheduler.load_state_dict(self.checkpoint['scheduler_state_dict'])
         else: 
             meta_lr_scheduler = None
 
