@@ -4,7 +4,6 @@ __author__ = 'Richard Diehl Martinez'
 import sys 
 sys.path.insert(0, '../lib')
 
-
 import typing
 import torch
 import logging 
@@ -12,11 +11,9 @@ import wandb
 import time 
 import os 
 
-# TODO: temporary
-from transformers import AdamW, get_constant_schedule_with_warmup
+from transformers import AdamW, get_linear_schedule_with_warmup
 
 import torch.multiprocessing as mp
-from torch.optim.lr_scheduler import OneCycleLR
 
 from .models import XLMR
 from .metalearners import MAML, BaselineLearner
@@ -28,6 +25,8 @@ from .datasets import MetaDataset, MetaDataLoader
 from configparser import ConfigParser
 from typing import Union
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LambdaLR
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +50,12 @@ class Problyglot(object):
 
         # config params need to be accessed by several methods
         self.config = config
+
+        self.mode = config.get("EXPERIMENT", "mode", fallback='train')
+        if self.mode not in ['train', 'inference']:
+            raise Exception(
+                f"Invalid problyglot run mode: {self.mode} - must be 'train' or 'inference'"
+            )
         
         # whether to log out information to w&b
         self.use_wandb = config.getboolean('EXPERIMENT', 'use_wandb', fallback=True)
@@ -77,27 +82,10 @@ class Problyglot(object):
         if self.base_device == torch.device("cuda"):
             logger.info(f"Number of GPUs available: {num_gpus}")
 
-        # setting base model 
-        self.base_model_name = config.get("BASE_MODEL", "name")
-        self.base_model = self.load_model(self.base_model_name)
-
         # setting num_task_batches before learner, to inform learner if we are resuming training 
         # or starting fresh 
         self.num_task_batches = resume_num_task_batches if resume_num_task_batches else 0
 
-        # setting meta learning rate 
-        self.meta_lr = config.getfloat("PROBLYGLOT", "meta_learning_rate", fallback=1e-3)
-
-        # setting scheduling protocol for meta learning rate
-        self.meta_lr_scheduler_method = config.get(
-            "PROBLYGLOT",
-            "meta_lr_scheduler_method",
-            fallback=None
-        )
-
-        # setting learner 
-        self.learner_method = self.config.get("LEARNER", "method")
-        self.learner = self.load_learner(self.learner_method)
 
         # setting meta training and evaluation parameters
         self.num_tasks_per_iteration = self.config.getint(
@@ -120,11 +108,70 @@ class Problyglot(object):
             # setting up metrics for logging to wandb
             # counter tracks number of batches of tasks seen by metalearner
             wandb.define_metric("num_task_batches")
+            
+        
+        # Possibly loading in a checkpoint file
+        self.checkpoint = self.load_checkpoint()
+
+        # setting base model 
+        self.base_model_name = config.get("BASE_MODEL", "name")
+        self.base_model = self.load_model(self.base_model_name)
+
+        # setting learner 
+        self.learner_method = self.config.get("LEARNER", "method")
+        self.learner = self.load_learner(self.learner_method)
+
+        # setting meta learning rate 
+        self.meta_lr = config.getfloat("PROBLYGLOT", "meta_learning_rate", fallback=1e-3)
+
+        # setting scheduling protocol for meta learning rate
+        meta_lr_scheduler_method = config.get(
+            "PROBLYGLOT",
+            "meta_lr_scheduler_method",
+            fallback=None
+        )
+        # setting up the optimizer
+        self.meta_optimizer = self.setup_meta_optimizer()
+        self.meta_lr_scheduler = self.setup_meta_lr_scheduler(meta_lr_scheduler_method)
         
         # setting evaluator 
         if 'EVALUATION' in config:
             self.evaluator = Evaluator(config)
 
+            self.save_eval_checkpoints = config.getboolean(
+                "EVALUATION",
+                "save_checkpoints",
+                fallback=False
+            )
+
+    ### -- Initialization helper functions -- ###
+
+    def load_checkpoint(self): 
+        """
+        Posibly loads in a checkpoint file if either provided in config or if we are resuming
+        training from a previous job.
+        """
+
+        # if num_task_batches is 0 at the start of training, then we are resuming training 
+        if self.num_task_batches > 0:
+            checkpoint_file = "latest-checkpoint.pt"
+            checkpoint_run = None
+        else:
+            checkpoint_file = self.config.get("LEARNER", "checkpoint_file", fallback="")
+            checkpoint_run = self.config.get("LEARNER", "checkpoint_run", fallback="")
+
+        if checkpoint_file:
+            if not self.use_wandb:
+                logger.warning("Could not load in checkpoint file, use_wandb is set to False")
+            else:
+                logger.info(f"Loading in checkpoint file: {checkpoint_file}")
+                wandb_checkpoint = wandb.restore(checkpoint_file, run_path=checkpoint_run)
+                checkpoint = torch.load(wandb_checkpoint.name)
+                os.rename(os.path.join(wandb.run.dir, checkpoint_file),
+                          os.path.join(wandb.run.dir, "loaded_checkpoint.pt"))
+                return checkpoint
+        
+        return None
 
     def load_model(self, base_model_name: str) -> torch.nn.Module:
         """
@@ -196,32 +243,83 @@ class Problyglot(object):
             **learner_kwargs
         )
 
-        # NOTE: possibly load in learner checkpoint
-        # if num_task_batches is 0 at the start of training, then we are resuming training 
-        if self.num_task_batches > 0:
-            checkpoint_file = "latest-checkpoint.pt"
-            checkpoint_run = None
-        else:
-            checkpoint_file = self.config.get("LEARNER", "checkpoint_file", fallback="")
-            checkpoint_run = self.config.get("LEARNER", "checkpoint_run", fallback="")
-
-        if checkpoint_file:
-            if not self.use_wandb:
-                logger.warning("Could not load in checkpoint file, use_wandb is set to False")
-            else:
-                logger.info(f"Loading in checkpoint file: {checkpoint_file}")
-                wandb_checkpoint = wandb.restore(checkpoint_file, run_path=checkpoint_run)
-                checkpoint = torch.load(wandb_checkpoint.name)
-                learner.load_state_dict(checkpoint['learner_state_dict'], strict=False)
-
-                # TODO load in optimizer state dict to self.meta_optimizer
-                learner.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                os.rename(os.path.join(wandb.run.dir, checkpoint_file),
-                          os.path.join(wandb.run.dir, "loaded_checkpoint.pt"))
+        if self.checkpoint is not None:
+            learner.load_state_dict(checkpoint['learner_state_dict'], strict=False)
         else:
             logger.info("No checkpoint used - learning from scratch")
 
         return learner
+
+
+    def setup_meta_optimizer(self) -> Optimizer:
+        """
+        Helper function for setting up meta optimizer and optionally an associated learning 
+        rate scheduler.
+
+        Returns: 
+            * meta_optimizer (Optimizer): meta optimizer to be used for meta learning
+        """
+        meta_optimizer = AdamW(self.learner.outerloop_optimizer_param_groups(), lr=self.meta_lr)
+        meta_optimizer.zero_grad()
+
+        if self.checkpoint is not None:
+            meta_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        return meta_optimizer
+
+
+    def setup_meta_lr_scheduler(self, meta_lr_scheduler_method) -> Union[LambdaLR, None]: 
+        """
+        Helper function for setting up meta scheduler and optionally an associated learning 
+        rate scheduler.
+
+        Args: 
+            * meta_lr_scheduler_method (str): method for meta learning rate scheduler
+
+        Returns: 
+            * meta_lr_scheduler (_LRScheduler or None): meta learning rate scheduler
+        """
+        if meta_lr_scheduler_method is not None: 
+            if meta_lr_scheduler_method == "linear":
+                meta_lr_scheduler = get_linear_schedule_with_warmup(
+                    self.meta_optimizer,
+                    num_warmup_steps=0.1*self.max_task_batch_steps,
+                    num_training_steps=self.max_task_batch_steps
+                )
+            else: 
+                raise Exception(
+                    f"Invalid meta scheduler method: {self.meta_lr_scheduler_method}"
+                )
+
+            if self.checkpoint is not None:
+                meta_lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        else: 
+            meta_lr_scheduler = None
+
+        return meta_lr_scheduler
+
+    ### --- Saving and shutdown helpers --- ### 
+
+    def save_checkpoint(self, checkpoint_file: str) -> None:
+        """
+        Helper function for saving a checkpoint of the learner and optimizer state dicts.
+
+        Args:
+            * checkpoint_file (str): name of checkpoint file to save
+        """
+        if not self.use_wandb:
+            logger.warning("Cannot save model checkpoint - requires use_wandb to be True")
+            return
+        
+        checkpoint = {
+            'learner_state_dict': self.learner.state_dict(),
+            'optimizer_state_dict': self.meta_optimizer.state_dict(),
+        }
+
+        if self.meta_lr_scheduler is not None:
+            checkpoint['scheduler_state_dict'] = self.meta_lr_scheduler.state_dict()
+        
+        torch.save(checkpoint, os.path.join(wandb.run.dir, checkpoint_file))
+        wandb.save(checkpoint_file, policy="now")
 
     def shutdown_processes(self) -> None:
         """Helper function for shutting down any spawned processes """
@@ -248,28 +346,15 @@ class Problyglot(object):
         """
 
         logger.info("Timeout (SIGINT) termination signal received")
-        logger.info("Attempting to save final checkpoint of model")
+        logger.info("Attempting to save latest checkpoint of model")
 
-        if self.config.getboolean('PROBLYGLOT', 'save_latest_checkpoint', fallback=True):
-            if not self.use_wandb:
-                logger.error("Cannot save model checkpoint because use_wandb set to False")
-            else:
-                logger.info(f"Saving model checkpoint")
-                checkpoint = {
-                    'learner_state_dict': self.learner.state_dict(),
-                    'optimizer_state_dict': self.learner.optimizer.state_dict(),
-                }
-                # forcing move to save out latest checkpoint before spawning new job
-                torch.save(checkpoint, os.path.join(wandb.run.dir, "latest-checkpoint.pt"))
-                wandb.save('latest-checkpoint.pt', policy="now")
+        self.save_checkpoint("latest-checkpoint.pt")
 
-                # writing out the current task batch number to the run_file 
-                if not os.path.exists('tmp'):
-                    os.mkdir('tmp')
-                with open(f"tmp/{wandb.run.id}.runfile", "w+") as f:
-                    f.write(str(max(self.num_task_batches-1, 0)))
-        else:
-            logger.error("Failed to save checkpoint - save_latest_checkpoint set to False")
+        # writing out the current task batch number to the run_file 
+        if not os.path.exists('tmp'):
+            os.mkdir('tmp')
+        with open(f"tmp/{wandb.run.id}.runfile", "w+") as f:
+            f.write(str(max(self.num_task_batches-1, 0)))
 
         self.shutdown_processes()
 
@@ -277,30 +362,8 @@ class Problyglot(object):
         exit(124)
 
 
-    def setup_meta_optimizer(self) -> None:
-        """
-        Helper function for setting up meta optimizer and optionally an associated learning 
-        rate scheduler.
-        """
-        self.meta_optimizer = AdamW(self.learner.outerloop_optimizer_param_groups(), lr=self.meta_lr)
-        self.meta_optimizer.zero_grad()
-
-        if self.meta_lr_scheduler_method is not None: 
-            if self.meta_lr_scheduler_method == "linear":
-                self.meta_lr_scheduler = OneCycleLR(
-                    self.meta_optimizer,
-                    max_lr=self.meta_lr,
-                    total_steps=self.max_task_batch_steps,
-                    pct_start=0.1,
-                )
-            else: 
-                raise Exception(
-                    f"Invalid meta learning rate scheduler method: {self.meta_lr_scheduler_method}"
-                )
-        else: 
-            self.meta_lr_scheduler = None
-
-
+    ### --- Meta training loop helper --- ### 
+    
     def meta_optimizer_step(self, grad_norm_constant: int) -> None:
         """
         Helper function for performing meta optimization step. Normalizes the gradients by the
@@ -328,21 +391,20 @@ class Problyglot(object):
         on data stored in self.meta_dataloader
         """
 
-        self.setup_meta_optimizer()
+        ### --------- Inference Mode (no model training) ---------- 
 
-        ### --------- Evaluation Mode (will return early) ---------- 
-        if not hasattr(self, "meta_dataset"):
-            logger.info("Running problygot in evaluation mode")
+        if self.mode == "inference":
+            logger.info("Running problygot in inference-only mode")
 
             if not hasattr(self, "evaluator"):
-                logger.warning("No evaluator specified - running problygot is a no-op")
+                logger.error("Need to specify an evaluator to run in inference-only mode")
                 return 
             
-            logger.info("Finished running evaluation model")
             self.evaluator.run(self.learner)
+            logger.info("Finished running inference-only model")
             return 
 
-        ### --------- Training Mode ---------- 
+        ### -------------------- Training Mode -------------------- 
 
         logger.info("Running problyglot in training mode")
 
@@ -390,16 +452,15 @@ class Problyglot(object):
         if self.use_wandb:
             wandb.define_metric("train.loss", step_metric="num_task_batches", summary='min')
 
-            # TODO: ADD ME BACK IN
-            # if self.learner_method != "baseline":
-            #     # any meta-learning approach will want to track the learned learning rates
-            #     wandb.define_metric("classifier_lr", step_metric="num_task_batches")
+            if self.learner_method != "baseline":
+                # any meta-learning approach will want to track the learned learning rates
+                wandb.define_metric("classifier_lr", step_metric="num_task_batches")
                 
-            #     # for inner layers we need to track lr per layer
-            #     num_layers = len(self.learner.inner_layers_lr)
-            #     for layer_idx in range(num_layers):
-            #         wandb.define_metric(f"inner_layer_{layer_idx}_lr",
-            #                             step_metric="num_task_batches")
+                # for inner layers we need to track lr per layer
+                num_layers = len(self.learner.inner_layers_lr)
+                for layer_idx in range(num_layers):
+                    wandb.define_metric(f"inner_layer_{layer_idx}_lr",
+                                        step_metric="num_task_batches")
 
         if self.config.getboolean("PROBLYGLOT", "run_initial_eval", fallback=True) and \
             self.num_task_batches == 0:
@@ -410,7 +471,6 @@ class Problyglot(object):
                 logger.warning("Evaluation missing in config - skipping evaluator run")
             else: 
                 self.evaluator.run(self.learner, num_task_batches=0)
-
 
         ### Model training loop
 
@@ -424,33 +484,37 @@ class Problyglot(object):
                 ## Basic training with just a single GPU 
                 task_name, support_batch_list, query_batch = task_batch
 
-                task_loss = self.learner.run_inner_loop(support_batch_list, query_batch)            
+                task_loss = self.learner.run_train_loop(support_batch_list, query_batch)            
                 task_loss = task_loss/self.num_tasks_per_iteration # normalizing loss 
                 task_batch_loss += task_loss
-
+       
             if ((task_batch_idx + 1) % self.num_tasks_per_iteration == 0):
                 #### NOTE: Just finished a batch of tasks 
 
                 if self.use_multiple_gpus: 
-                    while True:
-                        # Waiting for all processes to finish computing gradients
-                        time.sleep(1)
-                        if loss_queue.qsize() == self.num_tasks_per_iteration:
-                            break
+                    raise NotImplementedError
 
-                    ## Multi GPU: gathering up all of the task losses
-                    for _ in range(self.num_tasks_per_iteration):
+                    # while True:
+                    #     # Waiting for all processes to finish computing gradients
+                    #     time.sleep(1)
+                    #     if loss_queue.qsize() == self.num_tasks_per_iteration:
+                    #         break
 
-                        loss = loss_queue.get()[0]
-                        task_batch_loss += loss
+                    # ## Multi GPU: gathering up all of the task losses
+                    # for _ in range(self.num_tasks_per_iteration):
+
+                    #     loss = loss_queue.get()[0]
+                    #     task_batch_loss += loss
                                                 
                 ##### NOTE: Taking a global (meta) update step
                 self.num_task_batches += 1
                 if self.use_multiple_gpus: 
-                    # informing/waiting for workers to all take an optimizer step 
-                    step_optimizer.set()
-                    while step_optimizer.is_set():
-                        time.sleep(1)
+                    raise NotImplementedError
+
+                    # # informing/waiting for workers to all take an optimizer step 
+                    # step_optimizer.set()
+                    # while step_optimizer.is_set():
+                    #     time.sleep(1)
                 else: 
                     # single GPU: taking optimizer step
                     self.meta_optimizer_step(grad_norm_constant=self.num_tasks_per_iteration)
@@ -460,17 +524,16 @@ class Problyglot(object):
                 logger.info(f"\t(Meta) training loss: {task_batch_loss}")
                 if self.use_wandb:
                     
-                    # TODO: ADD ME BACK IN
-                    # if self.learner_method != "baseline": 
-                    #     # wandb logging info for any meta-learner
-                    #     wandb.log({"classifier_lr": self.learner.classifier_lr.item()},
-                    #                commit=False
-                    #               )
+                    if self.learner_method != "baseline": 
+                        # wandb logging info for any meta-learner
+                        wandb.log({"classifier_lr": self.learner.classifier_lr.item()},
+                                   commit=False
+                                  )
 
-                    #     for layer_idx, inner_layer in enumerate(self.learner.inner_layers_lr):
-                    #             wandb.log({f"inner_layer_{layer_idx}_lr": inner_layer.item()}, 
-                    #                       commit=False
-                    #                      )
+                        for layer_num, layer in self.learner.inner_layers_lr.items():
+                                wandb.log({f"inner_layer_{layer_num}_lr": layer.item()}, 
+                                          commit=False
+                                         )
 
                     wandb.log({"train.loss": task_batch_loss,
                                "num_task_batches": self.num_task_batches},
@@ -485,7 +548,15 @@ class Problyglot(object):
                     if not hasattr(self, "evaluator"):
                         logger.warning("Evaluation missing in config - skipping evaluator run")
                     else: 
-                        self.evaluator.run(self.learner, num_task_batches=self.num_task_batches)
+                        new_best = self.evaluator.run(
+                            self.learner,
+                            num_task_batches=self.num_task_batches
+                        )
+
+                        if self.save_eval_checkpoints:
+                            self.save_checkpoint('latest-checkpoint.pt')
+                            if new_best:
+                                self.save_checkpoint(f"checkpoint-{self.num_task_batches}.pt")
 
                 if (self.num_task_batches % self.max_task_batch_steps == 0):
                     # NOTE: stop training if we've done max_task_batch_steps global update steps
@@ -494,17 +565,7 @@ class Problyglot(object):
         ### Model done training - final clean up before exiting 
 
         logger.info("Finished training model")
-        if self.config.getboolean('PROBLYGLOT', 'save_final_model', fallback=True):
-            if not self.use_wandb:
-                logger.error("Cannot save model checkpoint because use_wandb set to False")
-            else:
-                logger.info(f"Saving trained model")
-                checkpoint = {
-                    'learner_state_dict': self.learner.state_dict(),
-                    'optimizer_state_dict': self.learner.optimizer.state_dict(),
-                }
-                torch.save(checkpoint, os.path.join(wandb.run.dir, f"final.pt"))
-                # NOTE: checkpoint will be uploaded to wandb on exiting program
+        self.save_checkpoint("final.pt")
         
         self.shutdown_processes()
 

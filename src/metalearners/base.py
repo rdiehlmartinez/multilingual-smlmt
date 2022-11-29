@@ -38,7 +38,6 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         lm_head_n: Union[int, str] = 100,
         retain_lm_head: Union[bool, str] = False,
         use_multiple_samples: Union[bool, str] = True,
-        **kwargs
     ) -> None:
         """
         BaseLearner establishes the inferface for the learner class.
@@ -162,7 +161,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             * model_outputs: Result of passing data_batch through the base_model. 
                 Should have shape: (batch_size, sequence_length, hidden_size)
             * data_batch: Batch of data for a forward pass through the model 
-                (see run_inner_loop for information on the data structure)
+                (see run_innerloop for information on the data structure)
             * task_head_weights: Weights used by the task head (in this the classifier head)
             * task_type (str): Type of task (e.g. 'classification')
         Returns: 
@@ -172,9 +171,10 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         #indexing into sequence layer of model_outputs -> (batch_size, hidden_size) 
         batch_size = model_outputs.size(0)
+
         last_hidden_state = model_outputs[torch.arange(batch_size),
                                           data_batch['input_target_idx']]
-
+        
         if task_type == 'classification':
             head = ClassificationHead()
         else: 
@@ -193,130 +193,24 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def outerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
         """
-        Returns the parameter groups that are learnable during the outer loop. Note that 
-        we might not have any inner loop parameters that need to be optimized (baseline model),
-        thus only this method needs to be implemented.
+        Returns the parameter groups that are learnable during the outer loop - i.e. the global 
+        parameters of the model (this is in contrast to the inner loop parameteres). 
+        Note, however, that we might not have any inner loop parameters that need to be optimized 
+        (such as in the case of the baseline model), thus only this method needs to be implemented.
         """
-        raise NotImplementedError
-
-    ###### Model training methods ######
-
-    # def optimizer_step(self, set_zero_grad: bool = False) -> None:
-    #     """ 
-    #     Take a global update step of the meta learner params; optionally set the gradients of the 
-    #     meta learner gradient tape back to zero.
-
-    #     Args:
-    #         * set_zero_grad (bool): Whether to set the gradients of the meta learner gradient tape
-    #             back to zero after the optimizer step. Defaults to False.
-
-    #     """
-    #     assert(hasattr(self, 'optimizer')),\
-    #         "Learner cannot take optimizer step - needs to define an optimizer attribute"
-
-    #     self.optimizer.step()
-    #     if set_zero_grad:
-    #         self.optimizer.zero_grad()
-    
-    # def forward(self, learner, support_batch, query_batch, device):
-    #     """ 
-    #     NOTE: Only the DistributedDataParallel version of this model should indirectly call this.
-    #           Used as a wrapper to run_inner_loop. 
-    #           Unless you know what you're doing, don't call this method.
-    #     """
-    #     return learner.run_inner_loop(support_batch, query_batch, device)
-
-    # def setup_DDP(self, rank: int, world_size: int) -> Tuple[torch.device, DDP]:
-    #     """ 
-    #     Helper method for setting up distributed data parallel process group and returning 
-    #     a wrapper DDP instance of the learner
-        
-    #     Args: 
-    #         * rank (int): Rank of current GPU 
-    #         * world_size (int): Number of GPUs should be the same as utils.num_gpus
-
-    #     Returns:
-    #         * device (int): Device to run model on
-    #         * ddp (torch.nn.parallel.DistributedDataParallel): Wrapped DDP learner
-    #     """
-    #     device = torch.device(f"cuda:{rank}")
-    #     os.environ['MASTER_ADDR'] = 'localhost'
-    #     os.environ['MASTER_PORT'] = '32432'
-    #     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    #     set_seed(self.seed)
-
-    #     self.to(device)
-
-    #     ddp = DDP(self, device_ids=[rank], find_unused_parameters=True)
-    #     return (device, ddp)
-
-    # def run_inner_loop_mp(
-    #     self,
-    #     rank: int,
-    #     world_size: int,
-    #     data_queue: Queue,
-    #     loss_queue: Queue,
-    #     step_optimizer: Event, 
-    #     num_tasks_per_iteration: int,
-    # ) -> None:
-    #     """
-    #     Entry point for running inner loop using multiple processes. Sets up DDP init process
-    #     group, wraps learner in DDP and calls forward/backward on the DDP-wrapped model.
-
-    #     Args: 
-    #         * rank (int): Rank of current GPU 
-    #         * world_size (int): Number of GPUs should be the same as utils.num_gpus
-    #         * data_queue (multiprocessing.Queue): Queue from which we read passed in data
-    #         * loss_queue (multiprocessing.Queue): Queue to which we write loss values
-    #         * step_optimizer (multiprocessing.Event): Event to signal workers to take an optimizer
-    #             step
-    #         * num_tasks_per_iteration (int): Number of tasks per iteration that the user specifies
-    #             in the experiment config file
-    #     """
-
-    #     device, ddp = self.setup_DDP(rank, world_size)
-
-    #     while True: 
-    #         # The main process sends signal to update optimizers
-
-    #         while True: 
-    #             # Waiting for the next batch of data 
-    #             # NOTE: If there is no data either 1) the dataloading pipeline is taking a while 
-    #             # or 2) the main process is waiting for all the workers to finish 
-    #             try:
-    #                 batch = data_queue.get(block=False)[0]
-    #                 break
-    #             except EmptyQueue: 
-    #                 pass
-
-    #             if step_optimizer.is_set():
-    #                 # make sure all workers have taken an optimizer step
-    #                 self.optimizer_step(set_zero_grad=True)
-    #                 dist.barrier()
-
-    #                 # once all workers have update params clear the flag to continue training
-    #                 step_optimizer.clear()
-
-    #             time.sleep(1) 
-
-    #         task_name, support_batch, query_batch = batch
-
-    #         task_loss = ddp(self, support_batch, query_batch, device)
-    #         task_loss = task_loss/num_tasks_per_iteration
-    #         task_loss.backward()
-
-    #         loss_queue.put([task_loss.detach().item()])
+        raise NotImplementedErrorxw
 
     @abc.abstractmethod
-    def run_inner_loop(
+    def run_train_loop(
         self,
         support_batch_list: List[Dict[str, torch.Tensor]],
         query_batch: Dict[str, torch.Tensor],
         device: torch.device = None, 
     ) -> torch.Tensor:
         """ 
-        Run an inner loop optimization step (in the context of meta learning); assumes 
-        that the class contains the model that is to-be meta-learned.
+        Trains a model to perform a language modeling task by giving it access to the data in the 
+        support_batch_list and query_batch. In the context of meta learning, this training loop
+        is the inner loop optimization step.
 
         Args:
             * support_batch_list: A list of task batches, each batch of task data is represented
@@ -338,14 +232,13 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
     # ###### Model evaluation methods ######
 
-
 class BaseMetaLearner(BaseLearner):
 
     def __init__(
         self,
-        initial_inner_lr: Union[float, str] = 1e-2,
+        initial_base_model_lr: Union[float, str] = 1e-2,
         initial_classifier_lr: Union[float, str] = 1e-1,
-        num_inner_loop_steps: Union[int, str] = 7,
+        num_innerloop_steps: Union[int, str] = 7,
         use_first_order: Union[bool, str] = False,
         **kwargs
     ) -> None:
@@ -359,11 +252,11 @@ class BaseMetaLearner(BaseLearner):
         we store per-layer parameter weights.
 
         Args:
-            * initial_inner_lr: Initial inner-loop learning rate of the base_model - this value is 
-                learned over the course of meta-learning 
-            * initial_classifier_lr: Initial inner-loop learning rate of the classifier head - this value
-                is learned over the course of meta-learning 
-            * num_inner_loop_steps: Number of gradients steps in the inner loop used to learn the
+            * initial_base_model_lr: Initial inner-loop learning rate of the base_model 
+                - this value is learned over the course of meta-learning 
+            * initial_classifier_lr: Initial inner-loop learning rate of the classifier head
+                - this value is learned over the course of meta-learning 
+            * num_innerloop_steps: Number of gradients steps in the inner loop used to learn the
                 meta-learning task
             * use_first_order: Whether a first order approximation of higher-order gradients
                 should be used                
@@ -371,7 +264,9 @@ class BaseMetaLearner(BaseLearner):
         super().__init__(**kwargs)
 
         self.inner_layers_lr = {
-            layer: torch.nn.Parameter(torch.tensor(float(initial_inner_lr)).to(self.base_device)) 
+            layer: torch.nn.Parameter(
+                torch.tensor(float(initial_base_model_lr)).to(self.base_device)
+            ) 
                 for layer in self.base_model.trainable_layers
         }   
         
@@ -390,7 +285,7 @@ class BaseMetaLearner(BaseLearner):
             )
 
         # number of steps to perform in the inner loop
-        self.num_inner_loop_steps = int(num_inner_loop_steps)
+        self.num_innerloop_steps = int(num_innerloop_steps)
         
         # set flag to indicate if first-order approximation should be used (à la Reptile)
         if isinstance(use_first_order, str):
@@ -400,26 +295,27 @@ class BaseMetaLearner(BaseLearner):
 
     ### Base setup functionality for meta learning models
 
-    def innerloop_optimizer_param_groups(
+    def base_model_param_group_iterator(
         self,
-        base_model_override: torch.nn.Module = None, 
-        cast_lr_to_float: bool = False
-    ) -> Iterator[Dict[str, torch.nn.Parameter]]: 
-        """
-        Returns the parameter groups that are passed to the innerloop (diferentiable) optimizer.
+        base_model: torch.nn.Module,
+        require_grad: bool = True,
+        add_lr: bool = True,
+        cast_lr_to_float: bool = False,
+        return_param_name: bool = False,
+    ) -> Tuple[str, Iterator[Dict[str, torch.nn.Parameter]]]:
+        """ 
+        Iterator that returns the parameters of the passed in base_model 
 
         Args: 
-            * base_model_override: Optional torch.nn.Module to override the base_model stored in 
-                the class. This is useful if we want to use a different model for the inner loop
-                than the one we are meta-learning; for instance if we want to copy the base model 
-                and train it on a specific downstream NLU task. 
+            * base_model: The base model that we are extracting parameters from
+            * require_grad: Whether the parameters should require gradients
+            * add_lr: Whether the parameters should have a learning rate associated with them
+            * cast_lr_to_float: Whether to cast the learning rate to a float. This is useful if
+                we want to use the learning rate as a hyperparameter in the inner loop optimizer.
+        Yields: 
+            * param_group: A dictionary containing the parameters of the base_model
         """
-
-        if base_model_override is None:
-            base_model = self.base_model
-        else:
-            base_model = base_model_override
-
+        
         def extract_layer_num(layer_name): 
             layer = re.findall(r"layer.\d*", layer_name)
 
@@ -432,30 +328,97 @@ class BaseMetaLearner(BaseLearner):
             else: 
                 return None
 
-        param_groups = []
-
         for idx, (name, param) in enumerate(base_model.named_parameters()): 
-            if not param.requires_grad:
+            if not param.requires_grad and require_grad:
                 continue
 
-            layer_num = extract_layer_num(name)
-            if layer_num is None: 
-                raise Exception(
-                    "Could not find an innerloop learning rate for param: {}".format(name)
-                )
+            param_group = { 
+                "params": param,
+            }
 
-            layer_lr = self.inner_layers_lr[layer_num]
+            if add_lr:
+                layer_num = extract_layer_num(name)
+                if layer_num is None: 
+                    raise Exception(
+                        "Could not find an innerloop learning rate for param: {}".format(name)
+                    )
 
-            param_groups.append({
-                'params': param,
-                'lr': layer_lr.item() if cast_lr_to_float else layer_lr,
-            })
+                layer_lr = self.inner_layers_lr[layer_num]
+
+                param_group['lr'] = layer_lr.item() if cast_lr_to_float else layer_lr
+
+            if return_param_name: 
+                yield (name, param_group)
+            else:
+                yield param_group
+
+
+    def finetune_optimizer_param_groups(
+        self, 
+        base_model: torch.nn.Module,
+        task_head_weights: Dict[str, torch.nn.Parameter],
+        add_decay_information: bool = True,
+        weight_decay_val: float = 0.0,
+    ) -> Iterator[Dict[str, torch.nn.Parameter]]:
+        """
+        Iterator that returns the parameters of the passed in base_model and the task head weights
+
+        Args:
+            * base_model: The base model that we are extracting parameters from
+            * task_head_weights: The weights of the task head that we are extracting parameters
+                from
+            * add_decay_information: Whether to add weight decay information to the parameters
+            * weight_decay_val: The weight decay value to use for the parameters
+        Returns:
+            * param_group: A list of dictionaries containing the parameters of the base_model and 
+                the task head weights
+        """
+
+        no_decay = ["bias", "LayerNorm.weight"]
+
+        param_groups = []
+
+        # NOTE: We are not using the learning rates that we've learned in the inner loop; if 
+        # we want to do this just set add_lr to True
+
+        for param_name, param_group in self.base_model_param_group_iterator(
+            base_model, 
+            require_grad=True,
+            add_lr=False,
+            return_param_name=True,
+        ): 
+
+            if add_decay_information: 
+                if any(nd in param_name for nd in no_decay):
+                    param_group["weight_decay"] = 0.0
+                else: 
+                    param_group["weight_decay"] = weight_decay_val
+
+            param_groups.append(param_group)
+
+        param_groups.append({
+            'params': task_head_weights.values(),
+            'weight_decay': 0.0
+        })
 
         return param_groups
+
+
+    def innerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]: 
+        """
+        Returns the parameter groups that are passed to the innerloop (diferentiable) optimizer.
+        """
+        return list(self.base_model_param_group_iterator(
+            self.base_model,
+            require_grad=True,
+            add_lr=True,
+            cast_lr_to_float=False, # we want lr to be learnable parameters
+            return_param_name=False,
+        ))
             
     def outerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
         """
-        Returns the parameter groups that are passed to the outerloop optimizer.
+        Returns the parameter groups that are passed to the outerloop optimizer.            
         """
         
         param_groups = [

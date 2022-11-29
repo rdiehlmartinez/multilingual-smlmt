@@ -624,7 +624,7 @@ class MetaDataset(IterableDataset):
             language_task_kwargs = dict(config.items('LANGUAGE_TASK'))
             if config.getboolean("LEARNER", "use_multiple_samples", fallback=True):
                 language_task_kwargs['num_task_samples'] = \
-                    config.getint("LEARNER", "num_inner_loop_steps")
+                    config.getint("LEARNER", "num_innerloop_steps")
 
             dataset = IterableLanguageTaskDataset(
                 lng_root_fp,

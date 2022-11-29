@@ -30,7 +30,7 @@ class NLUCollator(object):
                     * label (int): Label of the sample
                     * list of input_ids (List[List[int]]): A list of input ids for each sample
         """
-        return base_collate_fn(batch, True)
+        return base_collate_fn(batch, return_standard_labels=True)
 
 class NLUDataLoader(DataLoader):
     """

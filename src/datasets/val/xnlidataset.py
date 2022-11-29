@@ -63,7 +63,6 @@ class XNLIDataGenerator(NLUTaskDataGenerator):
                     "finetune": {finetune language (str), finetune data file path (str)},
                     "evaluation": {evaluation language (str), evaluation data file path)}
                 }
-
         """
         language_files = []
         file_paths = os.listdir(root_path)

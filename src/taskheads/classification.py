@@ -147,7 +147,7 @@ def classification_protomaml(
         * n_labels: Number of labels (classes) to classify over 
         * model (nn.Module): Either the model or the 'functionalized' version of the base model
         * data_batch: Batch of data for a forward pass through the model 
-            (see run_inner_loop for information on the data structure).
+            (see run_innerloop for information on the data structure).
         * device: Device type ('cuda' or 'cpu')
         * params: Only needs to be passed in if the model is a functional model;
     Returns: 

@@ -13,14 +13,20 @@ import lib.higher.higher as higher
 
 import torch
 import torch.distributed as dist
-from transformers import AdamW
+# from transformers import AdamW
+from torch.optim import AdamW
 
 from .base import BaseMetaLearner
 from ..taskheads import TaskHead
 from ..utils import move_to_device
+from ..datasets import NLUDataLoader
 
 # typing imports 
-from typing import Dict, Tuple, List, Dict, Iterator, Any, Union
+from typing import Dict, Tuple, List, Callable
+from ..datasets import NLUDataset
+from ..utils.data import ShuffledIterableDataset
+from ..evaluation.evaluator import Metric
+
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +44,7 @@ class MAML(BaseMetaLearner):
     ###### Model training methods #####
  
     ### Helper function for adapting the functionalized parameters based on some data_batch
-    def run_adaptation(
+    def _run_innerloop(
         self,
         support_batch_list: List[Dict[str, torch.Tensor]],
         query_batch: Dict[str, torch.Tensor],
@@ -68,25 +74,27 @@ class MAML(BaseMetaLearner):
 
         """              
 
-        # Getting lrs for each parameter group
-        inner_loop_optimizer_lrs = {'lr': []}
-        for param_group in self.innerloop_optimizer_param_groups(): 
-            inner_loop_optimizer_lrs['lr'].append(param_group['lr'])
+        innerloop_optimizer_param_groups = self.innerloop_optimizer_param_groups()
 
-        inner_loop_optimizer_params = [
-            {'params': pg['params']} for pg in self.innerloop_optimizer_param_groups()
+        # Getting lrs for each parameter group
+        innerloop_optimizer_lrs = {'lr': []}
+        for param_group in innerloop_optimizer_param_groups: 
+            innerloop_optimizer_lrs['lr'].append(param_group['lr'])
+
+        innerloop_optimizer_params = [
+            {'params': pg['params']} for pg in innerloop_optimizer_param_groups
         ]
 
         # Setting up the inner loop optimizer; note that we need pass in the learning rates 
         # for each parameter group as an override argument to the higher diffopt optimizer
-        inner_loop_optimizer = torch.optim.SGD(inner_loop_optimizer_params, lr=0.0)
+        innerloop_optimizer = torch.optim.SGD(innerloop_optimizer_params, lr=0.0)
 
         with torch.backends.cudnn.flags(enabled=True), higher.innerloop_ctx(
             self.base_model,
-            inner_loop_optimizer,
+            innerloop_optimizer,
             copy_initial_weights=False,
             track_higher_grads=False,
-            override=inner_loop_optimizer_lrs,
+            override=innerloop_optimizer_lrs,
         ) as (flearner, diffopt):
             
             # Running the inner loop adaptation to the support set 
@@ -235,14 +243,16 @@ class MAML(BaseMetaLearner):
 
 
     ### Main Inner Training Loop 
-    def run_inner_loop(
+    # NOTE: this method might be moved to the base class
+    def run_train_loop(
         self,
         support_batch_list: List[Dict[str, torch.Tensor]],
         query_batch: Dict[str, torch.Tensor],
         device: torch.device = None, 
     ) -> torch.Tensor: 
         """
-        Implements the inner loop of the MAML process.
+        Implements the task training (inner loop) of the MAML process.
+        The main logic lives in the private `_run_innerloop` method() that is specific to MAML.
         
         Args: 
             * support_batch_list: A list of task batches, each batch of task data is represented
@@ -260,6 +270,7 @@ class MAML(BaseMetaLearner):
         Returns: 
             * loss (torch.Tensor): Loss value of the inner loop calculations
         """
+
         if device is None:
             device = self.base_device
 
@@ -270,7 +281,7 @@ class MAML(BaseMetaLearner):
         ]
         query_batch = move_to_device(query_batch, device)
        
-        num_adaptation_steps = self.num_inner_loop_steps
+        num_adaptation_steps = self.num_innerloop_steps
 
         # Setting up LM head for task training (either using existing one or setting up new one)
         if self.retain_lm_head:
@@ -294,9 +305,9 @@ class MAML(BaseMetaLearner):
             if 'protomaml' in self.lm_head_init_method and self.use_multiple_samples:
                 # If we're using protomaml, the first batch is used for sampling the task head 
                 support_batch_list = support_batch_list[1:]
-                num_adaptation_steps = self.num_inner_loop_steps - 1 
+                num_adaptation_steps = self.num_innerloop_steps - 1 
 
-        loss = self.run_adaptation(
+        loss = self._run_innerloop(
             support_batch_list,
             query_batch,
             lm_head_weights,
@@ -308,34 +319,41 @@ class MAML(BaseMetaLearner):
 
     def run_evaluation(
         self, 
-        finetune_dataloader: torch.utils.data.DataLoader,
-        eval_dataloader: torch.utils.data.DataLoader,
+        finetune_dataset: ShuffledIterableDataset,
+        eval_dataset: NLUDataset,
+        metric: Metric,
         task_type: str, 
         task_head_init_method: str,
         num_classes: int,
-    ) -> Tuple[List[int], float]:
+        max_epochs: int = 10,
+        batch_size: int = 256,
+    ) -> Tuple[float, float]:
         """
         Runs finetuning of the model on the support set data stored in the support_dataloader,
         and then evaluates the model on the eval_dataloader.
 
         Args: 
-            * finetune_dataloader: A torch.utils.data.DataLoader object containing the data for 
-                finetuning the pre-trained model for a given NLU task
-            * eval_dataloader: A torch.utils.data.DataLoader object containing the evaluation
-                set data for a given NLU task
+            * finetune_dataset: An NLU Dataset containing the data for finetuning the
+                pre-trained model on a given NLU task
+            * eval_dataset: An NLU Dataset containing the evaluation set data for the given NLU 
+                task
+            * metric: A callable metric instance that uses the finetuned model to compute the
+                target evaluation metric on the eval_dataloader
             * task_type: A string indicating the type of task (e.g. 'classification', 'qa', etc.)
             * task_head_init_method: A string indicating the method used to initialize the task
                 head weights
             * num_classes: An integer indicating the number of classes in the task
+            * max_epochs: An integer indicating the max number of epochs to run the finetuning;
+                we break out of the loop if the validation loss stops improving
+            * batch_size: An integer indicating the batch size to use for the finetuning
 
         Returns:
-            * eval_predictions: A list of integers indicating the predicted class for each sample
-                in the evaluation set
+            * eval_metric: The evaluation metric for the given task
             * eval_loss: A float indicating the loss of the model on the evaluation set 
         """
 
-        if 'protomaml' in task_head_init_method:
-            task_init_batch = move_to_device(next(iter(finetune_dataloader)), self.base_device)
+        assert 'protomaml' not in task_head_init_method,\
+            "Protomaml task head initialization is not supported for evaluation"
 
         # Setting up the task head for the task
         with torch.no_grad(): 
@@ -343,96 +361,152 @@ class MAML(BaseMetaLearner):
                 task_type,
                 task_head_init_method,
                 num_classes,
-                data_batch=task_init_batch if 'protomaml' in task_head_init_method else None,
             )
             task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
 
         finetune_model = copy.deepcopy(self.base_model)
-        # NOTE: We set up an optimizer to train the finetuned_model on the finetune data 
-        # (i.e. the support set data) -- we do not use the optimizer that is used to train the
-        # base_model on the meta-training data.
-        finetune_model_params_groups = itertools.chain(
-            # We both optimize the finetune model, along with the task head weights 
-            self.innerloop_optimizer_param_groups(
-                base_model_override=finetune_model,
-                cast_lr_to_float=True
-            ),
-            [{
-                'params': task_head_weights.values(),
-                'lr': self.classifier_lr,
-            }]
+
+        # Training parameters - should not be touched by the user
+        MAX_PATIENCE = 5
+        EVAL_EVERY_N_STEPS = 100
+        patience = MAX_PATIENCE
+
+        best_dev_metric = None
+        dev_batch = move_to_device(finetune_dataset.dev_batch, self.base_device)
+
+        # Setting up the optimizer
+        finetune_optimizer_param_groups = self.finetune_optimizer_param_groups(
+            finetune_model,
+            task_head_weights,
+            add_decay_information=True,
+            weight_decay_val=0.0
         )
 
-        finetune_optimizer = AdamW(finetune_model_params_groups)
+        finetune_optimizer = AdamW(finetune_optimizer_param_groups, lr=1e-5)
 
-        patience = 5
-        min_train_loss = None
-
-        # Finetuning the model on the data in the finetune dataloader 
         finetune_model.train()
-        for finetune_batch in itertools.cycle(finetune_dataloader):
-            finetune_optimizer.zero_grad()
 
-            finetune_batch = move_to_device(finetune_batch, self.base_device)
+        total_step_num = 0
 
-            outputs = finetune_model(
-                input_ids=finetune_batch['input_ids'],
-                attention_mask=finetune_batch['attention_mask']
-            )
+        early_exit_training = False
 
-            _, loss = self._compute_task_loss(
-                outputs,
-                finetune_batch,
-                task_head_weights, 
-                task_type=task_type
-            )
+        for epoch in range(max_epochs):
 
-            loss.backward()
-            finetune_optimizer.step()
-
-            # TODO: BETTER EARLY STOPPING
-
-            # We need to train the model to convergence on the finetune data, so we don't
-            # break out of the loop until we've gone through all the batches in the dataloader
-            # (i.e. we don't use the early stopping mechanism that is used in the inner loop)
+            if early_exit_training:
+                break
             
-            if min_train_loss is None or loss < min_train_loss:
-                min_train_loss = loss
-                patience = 3
+            finetune_dataloader = NLUDataLoader(
+                finetune_dataset,
+                batch_size=batch_size
+            )
 
-            if loss > min_train_loss: 
-                patience -= 1
-                if patience == 0:
+            # Finetuning the model on the data in the finetune dataloader 
+            for finetune_batch in finetune_dataloader:
+
+                if early_exit_training:
                     break
+
+                finetune_optimizer.zero_grad()
+
+                finetune_batch = move_to_device(finetune_batch, self.base_device)
+
+                outputs = finetune_model(
+                    input_ids=finetune_batch['input_ids'],
+                    attention_mask=finetune_batch['attention_mask']
+                )
+
+                _, loss = self._compute_task_loss(
+                    outputs,
+                    finetune_batch,
+                    task_head_weights, 
+                    task_type=task_type
+                )
+
+                loss.backward()
+
+                finetune_optimizer.step()
+
+                total_step_num += 1
+
+                if total_step_num % EVAL_EVERY_N_STEPS == 0:
+                    # Evaluating the model on the dev set to possbily break out early
+                    with torch.no_grad():
+                        finetune_model.eval()
+
+                        outputs = finetune_model(
+                            input_ids=dev_batch['input_ids'],
+                            attention_mask=dev_batch['attention_mask']
+                        )
+
+                        dev_logits, dev_loss = self._compute_task_loss(
+                            outputs,
+                            dev_batch,
+                            task_head_weights,
+                            task_type=task_type
+                        )
+                        
+                        dev_predictions = torch.argmax(dev_logits, dim=-1).tolist()
+                        dev_labels = dev_batch['label_ids'].tolist()
+
+                        dev_metric = metric(dev_predictions, dev_labels)
+
+                        if best_dev_metric is None or \
+                            metric.summary(dev_metric, best_dev_metric) == dev_metric:
+
+                            best_dev_metric = dev_metric
+                            patience = MAX_PATIENCE
+                        else:
+                            patience -= 1
+                            if patience == 0:
+                                early_exit_training=True                      
+
+                        finetune_model.train()
+
+                    logger.info(
+                    f"\t\t step: {total_step_num}, dev loss: {dev_loss}, dev metric: {dev_metric}"
+                    )
+
         
         # Running full evaluation
         finetune_model.eval()
 
+        eval_labels = []
         eval_predictions = []
+    
         total_eval_loss = 0.0
         total_eval_samples = 0
 
-        for eval_batch in eval_dataloader: 
-            eval_batch = move_to_device(eval_batch, self.base_device)
+        eval_dataloader = NLUDataLoader(
+            eval_dataset,
+            batch_size=batch_size
+        )
 
-            eval_outputs = finetune_model(
-                input_ids=eval_batch['input_ids'],
-                attention_mask=eval_batch['attention_mask'],
-            )
+        with torch.no_grad():
 
-            eval_logits, eval_loss = self._compute_task_loss(
-                eval_outputs, 
-                eval_batch,
-                task_head_weights,
-                task_type=task_type
-            )
+            for eval_batch in eval_dataloader: 
+                eval_batch = move_to_device(eval_batch, self.base_device)
 
-            eval_predictions.extend(torch.argmax(eval_logits, dim=-1).tolist())
+                eval_outputs = finetune_model(
+                    input_ids=eval_batch['input_ids'],
+                    attention_mask=eval_batch['attention_mask'],
+                )
 
-            batch_size = eval_logits.size(0)
-            total_eval_loss += eval_loss.item() * batch_size # loss is averaged across batch
-            total_eval_samples += batch_size 
+                eval_logits, eval_loss = self._compute_task_loss(
+                    eval_outputs, 
+                    eval_batch,
+                    task_head_weights,
+                    task_type=task_type
+                )
 
-        total_eval_loss /= total_eval_samples
+                eval_predictions.extend(torch.argmax(eval_logits, dim=-1).tolist())
+                eval_labels.extend(eval_batch['label_ids'].tolist())
 
-        return (eval_predictions, total_eval_loss)
+                batch_size = eval_logits.size(0)
+                total_eval_loss += eval_loss.item() * batch_size # loss is averaged across batch
+                total_eval_samples += batch_size 
+
+            total_eval_loss /= total_eval_samples
+
+            eval_metric = metric(eval_predictions, eval_labels)
+
+        return (eval_metric, total_eval_loss)

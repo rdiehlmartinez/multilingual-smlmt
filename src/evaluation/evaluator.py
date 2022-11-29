@@ -1,6 +1,7 @@
 __author__ = 'Richard Diehl Martinez'
 """ Deals with the orchestration of model evaluation on a variety of NLU tasks """
 
+import abc
 import logging
 import os
 import torch
@@ -9,13 +10,74 @@ import numpy as np
 
 from collections import defaultdict
 from ..datasets import NLUDataLoader, NLU_TASK_DATA_GENERATOR_MAPPING
+from ..utils.data import ShuffledIterableDataset
 
 logger = logging.getLogger(__name__)
 
 # Importing type hints
-from typing import List
+from typing import List, Callable
 from configparser import ConfigParser
 from ..metalearners import BaseLearner
+
+"""
+Helper classes for the evaluator; define interface for different types of evaluation metrics i.e. 
+accuracy, F1, etc.
+"""
+
+class Metric(object, metaclass=abc.ABCMeta):
+
+    @property
+    @abc.abstractmethod
+    def name(self) -> str:
+        """Name of the metric"""
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def summary(self) -> Callable:
+        """Summary function to use for the metric"""
+        raise NotImplementedError
+
+    @staticmethod
+    @abc.abstractmethod
+    def __call__(self, predictions: List[int], labels: List[int]) -> float:
+        """ 
+        Computes the metric given the predictions and labels
+
+        Args: 
+            predictions: List of predictions
+            labels: List of labels
+
+        Returns: 
+            metric: The metric value
+            
+        """
+        raise NotImplementedError
+
+class AccuracyMetric(Metric): 
+
+    @property
+    def name(self):
+        return "accuracy"
+
+    @property
+    def summary(self):
+        return max
+
+    @staticmethod
+    def __call__(
+        predictions: List[int],
+        labels: List[int]
+    ) -> float:
+        """ 
+        Computes accuracy of predictions for the data of the eval_dataloader
+        """        
+        accuracy = (np.array(predictions) == np.array(labels)).sum()/len(labels)
+        return accuracy
+
+"""
+Main evaluator class; orchestrates the evaluation of a model on a variety of NLU tasks
+"""
 
 class Evaluator(object): 
     def __init__(self, config: ConfigParser) -> None: 
@@ -37,48 +99,25 @@ class Evaluator(object):
             task: NLU_TASK_DATA_GENERATOR_MAPPING[task](config) for task in self.tasks
         }
 
-        self.batch_size = config.getint("EVALUATION", "batch_size", fallback=32)
+        self.batch_size = config.getint("EVALUATION", "batch_size", fallback=256)
 
-        self.save_eval_checkpoints = config.getboolean(
+        self.max_epochs = config.getint("EVALUATION", "max_epochs", fallback=5)
+
+        self.save_checkpoints = config.getboolean(
             "EVALUATION",
-            "save_eval_checkpoints",
+            "save_checkpoints",
             fallback=False
         )
 
-        if self.save_eval_checkpoints:
+        if self.save_checkpoints:
             # possibly keep track of previous runs of the evaluator for checkpoint purposes
             self.eval_run_tracker = defaultdict(list)
 
-        self.save_latest_checkpoint = config.getboolean(
-            "EVALUATION",
-            "save_latest_checkpoint",
-            fallback=True
-        )
-
         self.use_wandb = config.getboolean('EXPERIMENT', 'use_wandb', fallback=True)
         
-        self.learner_method = config.get("LEARNER", "method")
-
-    ### Helper methods for computing evaluation metrics
-
-    @staticmethod
-    def compute_accuracy(
-        predictions: List[int],
-        evaluation_dataloader: NLUDataLoader
-    ) -> float:
-        """ 
-        Computes accuracy of predictions for the data of the evaluation_dataloader
-        """
-        labels = []
-        for data_batch in evaluation_dataloader:
-            labels.extend(data_batch['label_ids'].tolist())
-        
-        accuracy = (np.array(predictions) == np.array(labels)).sum()/len(labels)
-        return accuracy
-
     ### Entry point to running evaluation
 
-    def run(self, learner: BaseLearner, num_task_batches: int = 0) -> None:
+    def run(self, learner: BaseLearner, num_task_batches: int = 0) -> bool:
         """ 
         Runs evaluation of the passed in learner on the self.tasks evaluation tasks. 
         Loops over each of the evaluation tasks in self.tasks and for each task 
@@ -90,13 +129,16 @@ class Evaluator(object):
             * learner (subclass of BaseLearner): learning procedure that was used to train the model
             * num_task_batches (int): optional value of the current task batch number at which
                 we are evaluating
+
+        Returns:
+            * new_best (bool): True if evaluation results are better than previous best results
         """
 
         logger.info("")
         logger.info("-"*30)
         logger.info("Running evaluator")
 
-        mark_best_ckpt = False
+        new_best = False
 
         for idx, task in enumerate(self.tasks):
             logger.info("*"*20)
@@ -110,82 +152,108 @@ class Evaluator(object):
             num_classes = task_data_generator.num_classes
 
             if task_type == "classification": 
-                compute_metric = self.compute_accuracy
-                metric_name = "acc"
-                metric_summary = 'max'
+                metric = AccuracyMetric()
             else: 
                 logger.exception(f"Invalid task type: {task_params['task_type']} for task: {task}")
                 raise Exception(f"Invalid task type: {task_params['task_type']} for task: {task}")
 
-            for subtask_idx, (finetune_dataset, evaluation_dataset) in enumerate(task_data_generator):
+            task_metrics, task_losses = [], []
+
+            for subtask_idx, (finetune_dataset, eval_dataset) in enumerate(task_data_generator):
                 finetune_lng = finetune_dataset.language
-                evaluation_lng = evaluation_dataset.language
+                eval_lng = eval_dataset.language
 
-                logger.info(f"\t Finetuning on: {finetune_lng} - Evaluating on: {evaluation_lng}")
+                logger.info(f"\t Finetuning on: {finetune_lng} - Evaluating on: {eval_lng}")
 
-                finetune_dataloader = NLUDataLoader(
+                # Wrapping finetune dataset in a ShuffledIterableDataset (to prevent overfitting 
+                # issues when finetuning on a small dataset); ShuffledIterableDataset also enables 
+                # us to hold out a validation set from the finetune dataset to monitor finetuning
+                finetune_dataset = ShuffledIterableDataset(
                     finetune_dataset,
-                    batch_size=self.batch_size
+                    buffer_size=5000,
+                    hold_out_dev_batch=True,
+                    batch_size=self.batch_size,
                 )
 
-                evaluation_dataloader = NLUDataLoader(
-                    evaluation_dataset,
-                    batch_size=self.batch_size
-                )
-
-                predictions, eval_loss = learner.run_evaluation(
-                    finetune_dataloader,
-                    evaluation_dataloader,
+                eval_metric, eval_loss = learner.run_evaluation(
+                    finetune_dataset,
+                    eval_dataset,
+                    metric,
                     task_type,
                     task_head_init_method,
                     num_classes,
+                    max_epochs=self.max_epochs,
+                    batch_size=self.batch_size,
                 )
 
                 ### Logging out metrics
                 if self.use_wandb:
-                    wandb.define_metric(f"{task}.{evaluation_lng}.{metric_name}",
-                                        step_metric="num_task_batches", summary=metric_summary)
-                    wandb.define_metric(f"{task}.{evaluation_lng}.loss",
-                                        step_metric="num_task_batches", summary='min')
+                    wandb.define_metric(
+                        f"{task}.{eval_lng}.{metric.name}",
+                        step_metric="num_task_batches",
+                        summary=metric.summary.__name__
+                    )
+                    wandb.define_metric(
+                        f"{task}.{eval_lng}.loss",
+                        step_metric="num_task_batches",
+                        summary='min'
+                    )
 
-                # compute metrics using predictions 
-                metric = compute_metric(predictions, evaluation_dataloader)
-                logger.info(f"{metric_name}: {metric:.4f} - Eval Loss: {eval_loss:.4f}")
+
+                logger.info(f"{metric.name}: {eval_metric:.4f} - Eval Loss: {eval_loss:.4f}")
                 if self.use_wandb:
-                    wandb.log({task: {
-                                    evaluation_lng: {
-                                        "loss": eval_loss,
-                                        metric_name: metric,
-                                    },
-                                },
-                            "num_task_batches": num_task_batches
-                            })
+                    wandb.log({
+                        task: {
+                            eval_lng: {
+                                "loss": eval_loss,
+                                metric.name: eval_metric,
+                            },
+                        },
+                        "num_task_batches": num_task_batches   
+                    })
 
+                task_metrics.append(eval_metric)
+                task_losses.append(eval_loss)
+            
+            task_metric_mean = sum(task_metrics)/len(task_metrics)
+            task_loss_mean = sum(task_losses)/len(task_losses)
+            
+            if self.use_wandb:
+                wandb.define_metric(
+                    f"{task}.{metric.name}",
+                    step_metric="num_task_batches",
+                    summary=metric.summary.__name__
+                )
+                wandb.define_metric(
+                    f"{task}.loss",
+                    step_metric="num_task_batches",
+                    summary='min'
+                )
+
+                wandb.log({
+                    task: {
+                        "loss": task_loss_mean,
+                        metric.name: task_metric_mean,      
+                    },
+                    "num_task_batches": num_task_batches
+                })
+
+                logger.info(f"\t (Task {idx}) Avg. {metric.name}: {task_metric_mean:.4f}")
+                logger.info(f"\t (Task {idx}) Avg. Loss: {task_loss_mean:.4f}")
+
+                # If we are saving eval checkpoints, then do some book-keeping to keep track of
+                # the best model
+                if self.save_checkpoints:
+                    self.eval_run_tracker[f'{task}.{metric.name}'].append(task_metric_mean)
+
+                    if metric.summary(self.eval_run_tracker[f'{task}.{metric.name}']) \
+                            == task_metric_mean:
+                        new_best = True
 
         ### If specified, possibly saving out checkpoint 
         logger.info("*"*20)
         logger.info("Finished evaluator")
-        
-
-        if self.save_latest_checkpoint or self.save_eval_checkpoints:
-            if not self.use_wandb:
-                logger.error("Cannot save model checkpoint because use_wandb set to False")
-            else:
-                checkpoint = {
-                    'learner_state_dict': learner.state_dict(),
-                    'optimizer_state_dict': learner.optimizer.state_dict(),
-                }
-
-                torch.save(checkpoint, os.path.join(wandb.run.dir, "latest-checkpoint.pt"))
-                wandb.save("latest-checkpoint.pt")
-
-                if mark_best_ckpt:
-                    logger.info(f"Saving new best model checkpoint at step: {num_task_batches}")
-                    torch.save(checkpoint, os.path.join(wandb.run.dir,\
-                                            f"checkpoint-{num_task_batches}.pt"))
-                    wandb.save(f"checkpoint-{num_task_batches}.pt")
-
-
         logger.info("-"*30)
         logger.info("")
 
+        return new_best

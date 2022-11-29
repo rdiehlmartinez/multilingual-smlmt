@@ -10,6 +10,7 @@ from .train.metadataloader import MetaDataLoader
 from .val.nludataloader import NLUDataLoader
 
 # nlu datasets for evaluation
+from .val.nludataset import NLUDataset
 from .val.xnlidataset import XNLIDataGenerator
 
 NLU_TASK_DATA_GENERATOR_MAPPING = {

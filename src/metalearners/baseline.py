@@ -57,10 +57,10 @@ class BaselineLearner(BaseLearner):
 
     ###### Model training methods ######
 
-    def run_inner_loop(self, support_batch, query_batch=None, device=None, *args, **kwargs): 
+    def run_innerloop(self, support_batch, query_batch=None, device=None, *args, **kwargs): 
         """ 
         Run an inner loop optimization step. Usually this is in the context of meta-learning, but
-        in the case of a baseline model an inner_loop simply amounts to running a forward pass
+        in the case of a baseline model an innerloop simply amounts to running a forward pass
         through the model and returning the corresponding loss.
 
         Args:
