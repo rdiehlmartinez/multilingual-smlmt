@@ -27,7 +27,6 @@ from typing import Union
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 
-
 logger = logging.getLogger(__name__)
 
 class Problyglot(object):
@@ -59,6 +58,7 @@ class Problyglot(object):
         
         # whether to log out information to w&b
         self.use_wandb = config.getboolean('EXPERIMENT', 'use_wandb', fallback=True)
+        self.save_checkpoints = config.getboolean("EXPERIMENT", "save_checkpoints", fallback=True)
 
         # setting up meta dataset for training if provided in config
         if 'META_DATASET' in config:
@@ -86,7 +86,6 @@ class Problyglot(object):
         # or starting fresh 
         self.num_task_batches = resume_num_task_batches if resume_num_task_batches else 0
 
-
         # setting meta training and evaluation parameters
         self.num_tasks_per_iteration = self.config.getint(
             "PROBLYGLOT",
@@ -108,7 +107,6 @@ class Problyglot(object):
             # setting up metrics for logging to wandb
             # counter tracks number of batches of tasks seen by metalearner
             wandb.define_metric("num_task_batches")
-            
         
         # Possibly loading in a checkpoint file
         self.checkpoint = self.load_checkpoint()
@@ -124,25 +122,13 @@ class Problyglot(object):
         # setting meta learning rate 
         self.meta_lr = config.getfloat("PROBLYGLOT", "meta_learning_rate", fallback=1e-3)
 
-        # setting scheduling protocol for meta learning rate
-        meta_lr_scheduler_method = config.get(
-            "PROBLYGLOT",
-            "meta_lr_scheduler_method",
-            fallback=None
-        )
-        # setting up the optimizer
+        # setting up the optimizer and learning rate scheduler for meta learning
         self.meta_optimizer = self.setup_meta_optimizer()
         self.meta_lr_scheduler = self.setup_meta_lr_scheduler(meta_lr_scheduler_method)
         
         # setting evaluator 
         if 'EVALUATION' in config:
             self.evaluator = Evaluator(config)
-
-            self.save_eval_checkpoints = config.getboolean(
-                "EVALUATION",
-                "save_checkpoints",
-                fallback=False
-            )
 
     ### -- Initialization helper functions -- ###
 
@@ -267,17 +253,21 @@ class Problyglot(object):
         return meta_optimizer
 
 
-    def setup_meta_lr_scheduler(self, meta_lr_scheduler_method) -> Union[LambdaLR, None]: 
+    def setup_meta_lr_scheduler(self) -> Union[LambdaLR, None]: 
         """
         Helper function for setting up meta scheduler and optionally an associated learning 
         rate scheduler.
 
-        Args: 
-            * meta_lr_scheduler_method (str): method for meta learning rate scheduler
-
         Returns: 
             * meta_lr_scheduler (_LRScheduler or None): meta learning rate scheduler
         """
+
+        meta_lr_scheduler_method = self.config.get(
+            "PROBLYGLOT",
+            "meta_lr_scheduler_method",
+            fallback=None
+        )
+
         if meta_lr_scheduler_method is not None: 
             if meta_lr_scheduler_method == "linear":
                 meta_lr_scheduler = get_linear_schedule_with_warmup(
@@ -348,6 +338,7 @@ class Problyglot(object):
         logger.info("Timeout (SIGINT) termination signal received")
         logger.info("Attempting to save latest checkpoint of model")
 
+        # Will try to save checkpoint to resume training from (even if self.checkpoints is False)
         self.save_checkpoint("latest-checkpoint.pt")
 
         # writing out the current task batch number to the run_file 
@@ -553,7 +544,7 @@ class Problyglot(object):
                             num_task_batches=self.num_task_batches
                         )
 
-                        if self.save_eval_checkpoints:
+                        if self.save_checkpoints:
                             self.save_checkpoint('latest-checkpoint.pt')
                             if new_best:
                                 self.save_checkpoint(f"checkpoint-{self.num_task_batches}.pt")
@@ -565,7 +556,8 @@ class Problyglot(object):
         ### Model done training - final clean up before exiting 
 
         logger.info("Finished training model")
-        self.save_checkpoint("final.pt")
+        if self.save_checkpoints:
+            self.save_checkpoint("final.pt")
         
         self.shutdown_processes()
 

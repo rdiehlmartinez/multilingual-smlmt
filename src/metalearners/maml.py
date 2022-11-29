@@ -85,8 +85,9 @@ class MAML(BaseMetaLearner):
             {'params': pg['params']} for pg in innerloop_optimizer_param_groups
         ]
 
-        # Setting up the inner loop optimizer; note that we need pass in the learning rates 
-        # for each parameter group as an override argument to the higher diffopt optimizer
+        # Setting up the inner loop optimizer; NOTE we need to pass in the learning rates 
+        # for each parameter group as an override argument to the higher diffopt optimizer - 
+        # this is an unfortunate hack 
         innerloop_optimizer = torch.optim.SGD(innerloop_optimizer_params, lr=0.0)
 
         with torch.backends.cudnn.flags(enabled=True), higher.innerloop_ctx(

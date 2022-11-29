@@ -102,12 +102,8 @@ class Evaluator(object):
         self.batch_size = config.getint("EVALUATION", "batch_size", fallback=256)
 
         self.max_epochs = config.getint("EVALUATION", "max_epochs", fallback=5)
-
-        self.save_checkpoints = config.getboolean(
-            "EVALUATION",
-            "save_checkpoints",
-            fallback=False
-        )
+ 
+        self.save_checkpoints = config.getboolean("EXPERIMENT", "save_checkpoints", fallback=True)
 
         if self.save_checkpoints:
             # possibly keep track of previous runs of the evaluator for checkpoint purposes
