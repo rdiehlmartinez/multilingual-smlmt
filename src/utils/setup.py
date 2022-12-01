@@ -73,7 +73,7 @@ def setup(config_file_path: str, run_id: str, resume_num_task_batches: int) -> C
     """
     Reads in config file, sets up logger and sets a seed to ensure reproducibility.
 
-    NOTE: The optional keyword arguments (resume_run_id and resume_num_task_batches) should never
+    NOTE: The optional keyword arguments (run_id and resume_num_task_batches) should never
     be manually set, rather they are passed in automatically by the program if it encounters a 
     time expiration error and thus spawns a new job to continue running the program.
     """

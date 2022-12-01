@@ -124,7 +124,13 @@ class Pipeline(object):
 
         # setting up the optimizer and learning rate scheduler for meta learning
         self.meta_optimizer = self.setup_meta_optimizer()
-        self.meta_lr_scheduler = self.setup_meta_lr_scheduler(meta_lr_scheduler_method)
+        
+        self.meta_lr_scheduler_method = self.config.get(
+            "PIPELINE",
+            "meta_lr_scheduler_method",
+            fallback=None
+        )
+        self.meta_lr_scheduler = self.setup_meta_lr_scheduler(self.meta_lr_scheduler_method)
         
         # setting evaluator 
         if 'EVALUATION' in config:
@@ -253,20 +259,17 @@ class Pipeline(object):
         return meta_optimizer
 
 
-    def setup_meta_lr_scheduler(self) -> Union[LambdaLR, None]: 
+    def setup_meta_lr_scheduler(self, meta_lr_scheduler_method) -> Union[LambdaLR, None]: 
         """
         Helper function for setting up meta scheduler and optionally an associated learning 
         rate scheduler.
 
+        Args:
+            * meta_lr_scheduler_method (str): name of meta learning rate scheduler to use
+
         Returns: 
             * meta_lr_scheduler (_LRScheduler or None): meta learning rate scheduler
         """
-
-        meta_lr_scheduler_method = self.config.get(
-            "PIPELINE",
-            "meta_lr_scheduler_method",
-            fallback=None
-        )
 
         if meta_lr_scheduler_method is not None: 
             if meta_lr_scheduler_method == "linear":

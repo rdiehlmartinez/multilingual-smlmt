@@ -7,7 +7,7 @@ import random
 import signal
 
 from src.utils import setup
-from src.Pipeline import Pipeline
+from src.pipeline import Pipeline
 
 parser = argparse.ArgumentParser(description="Parses config files passed in via CLI")
 parser.add_argument("Path", metavar='path', type=str, help='path to the config file')
