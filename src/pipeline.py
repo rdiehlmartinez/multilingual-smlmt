@@ -13,8 +13,6 @@ import os
 
 from transformers import AdamW, get_linear_schedule_with_warmup
 
-import torch.multiprocessing as mp
-
 from .models import XLMR
 from .metalearners import MAML, BaselineLearner
 from .evaluation import Evaluator
@@ -134,7 +132,7 @@ class Pipeline(object):
         
         # setting evaluator 
         if 'EVALUATION' in config:
-            self.evaluator = Evaluator(config)
+            self.evaluator = Evaluator(config, use_multiple_gpus=self.use_multiple_gpus)
 
     ### -- Initialization helper functions -- ###
 
@@ -430,16 +428,13 @@ class Pipeline(object):
         logger.info("Starting model training")
         for task_batch_idx, task_batch in enumerate(self.meta_dataloader):
             logger.debug(f"\t (Task idx {task_batch_idx}) Language: {task_batch[0]}")
-            if self.use_multiple_gpus:
-                ## Filling up data queue for workers to process
-                data_queue.put([task_batch], False)
-            else:
-                ## Basic training with just a single GPU 
-                task_name, support_batch_list, query_batch = task_batch
 
-                task_loss = self.learner.run_train_loop(support_batch_list, query_batch)            
-                task_loss = task_loss/self.num_tasks_per_iteration # normalizing loss 
-                task_batch_loss += task_loss
+            ## Basic training with just a single GPU 
+            task_name, support_batch_list, query_batch = task_batch
+
+            task_loss = self.learner.run_train_loop(support_batch_list, query_batch)            
+            task_loss = task_loss/self.num_tasks_per_iteration # normalizing loss 
+            task_batch_loss += task_loss
        
             if ((task_batch_idx + 1) % self.num_tasks_per_iteration == 0):        
                 ##### NOTE: Just finished a batch of tasks -- taking a global (meta) update step

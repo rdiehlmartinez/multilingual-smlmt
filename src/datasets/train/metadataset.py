@@ -4,14 +4,16 @@ __author__ = 'Richard Diehl Martinez'
 import os
 import torch 
 import gzip
-import multiprocessing
-import mmap
+#import mmap
 import random
 import time
 import logging
 import math
 import copy 
 import numpy as np
+
+import multiprocessing as mp 
+from multiprocessing.shared_memory import SharedMemory
 
 from torch.utils.data import IterableDataset
 from transformers import XLMRobertaTokenizer
@@ -35,6 +37,43 @@ SPECIAL_TOKEN_IDS = tokenizer.all_special_ids
 BYTE_ENCODING_SIZE = math.ceil(math.log(tokenizer.vocab_size + 1, 16)) 
 BYTE_ENDIAN_MODE = 'big'
 BYTE_END_MARKER = tokenizer.vocab_size.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE)
+
+class SharedMemoryBuffer(object): 
+    """
+    Data buffer that uses shared memory to store the data, and which can be pickled. Implements 
+    some of the same methods as the mmap module, but is not a drop-in replacement.
+    """
+    def __init__(self, size): 
+        self._shared_memory = SharedMemory(create=True, size=size)
+        self._index = 0 
+    
+    def write(self, data: bytes) -> None: 
+        """
+        Writes data to the buffer 
+        """
+        self._shared_memory.buf[self._index:self._index+len(data)] = data
+
+    def read(self, num_bytes: int) -> bytes: 
+        """
+        Reads num_bytes of data from the buffer
+        """
+        data = self._shared_memory.buf[self._index:self._index+num_bytes]
+        self._index += num_bytes
+        return data
+
+    def seek(self, index: int) -> None: 
+        """
+        Sets the index to read and write from
+        """ 
+        self._index = index
+
+    def shutdown(self) -> None: 
+        """
+        Unlinks and closes the shared memory buffer
+        """
+        self._shared_memory.unlink()
+        self._shared_memory.close()
+
 
 class IterableLanguageTaskDataset(object): 
     ''' 
@@ -119,14 +158,14 @@ class IterableLanguageTaskDataset(object):
             self.max_seq_len = tokenizer.max_len_single_sentence
 
         # event and lock to communicate between parent and child 
-        self.event = multiprocessing.Event()
-        self.lock = multiprocessing.Lock()
+        self.event = mp.Event()
+        self.lock = mp.Lock()
 
         # Extract data out of the buffers for support and query
-        self.support_data_buffer = mmap.mmap(-1, length=buffer_size)
-        self.query_data_buffer = mmap.mmap(-1, length=buffer_size)
-        
-        self.worker = multiprocessing.Process(
+        self.support_data_buffer = SharedMemoryBuffer(buffer_size)
+        self.query_data_buffer = SharedMemoryBuffer(buffer_size)
+
+        self.worker = mp.Process(
             target=self.generate_buffer,
             args=(seed,)
         )
@@ -140,6 +179,8 @@ class IterableLanguageTaskDataset(object):
 
     def shutdown(self) -> None:
         """ Needs to be called in order to terminate the data generation worker """
+        self.support_data_buffer.shutdown()
+        self.query_data_buffer.shutdown()
         self.worker.terminate()
         self.worker.join()
 
@@ -361,14 +402,17 @@ class IterableLanguageTaskDataset(object):
         return (support_set, query_set)
 
     @staticmethod
-    def write_to_buffer(curr_set: Dict[int, List[List[int]]], curr_buffer: mmap.mmap) -> None: 
+    def write_to_buffer(
+        curr_set: Dict[int, List[List[int]]],
+        curr_buffer: SharedMemoryBuffer
+    ) -> None: 
         """ 
         For the support and query set, write the data out to the respective buffers 
         
         Args:
             * curr_set {token id: [K samples where token id occurs]}: mapping of N token ids
                 to K samples per token id occurs
-            * curr_buffer (mmap.mmap): buffer to write the data to
+            * curr_buffer (SharedMemoryBuffer): buffer to write the data to
         """
         for subword_id, samples in curr_set.items():
             curr_buffer.write(subword_id.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE))
@@ -379,8 +423,7 @@ class IterableLanguageTaskDataset(object):
                     curr_buffer.write(encoded_token_id)
                 curr_buffer.write(BYTE_END_MARKER)
             
-        curr_buffer.flush()
-
+        
     def release_and_wait(self) -> None:
         """
         NOTE: This should only ever be run by a child worker.

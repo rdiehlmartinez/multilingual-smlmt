@@ -12,9 +12,10 @@ import copy
 import lib.higher.higher as higher
 
 import torch
-import torch.distributed as dist
+
 # from transformers import AdamW
 from torch.optim import AdamW
+from collections import defaultdict
 
 from .base import BaseMetaLearner
 from ..taskheads import TaskHead
@@ -22,7 +23,7 @@ from ..utils import move_to_device
 from ..datasets import NLUDataLoader
 
 # typing imports 
-from typing import Dict, Tuple, List, Callable
+from typing import Dict, Tuple, List, Callable, Union
 from ..datasets import NLUDataset
 from ..utils.data import ShuffledIterableDataset
 from ..evaluation.evaluator import Metric
@@ -328,7 +329,9 @@ class MAML(BaseMetaLearner):
         num_classes: int,
         max_epochs: int = 10,
         batch_size: int = 256,
-    ) -> Tuple[float, float]:
+        device: torch.device = None,
+        return_finetune_info: bool = True,
+    ) -> Union[Tuple[float, float], Tuple[float, float, Dict[str, List[float]]]]:
         """
         Runs finetuning of the model on the support set data stored in the support_dataloader,
         and then evaluates the model on the eval_dataloader.
@@ -347,14 +350,30 @@ class MAML(BaseMetaLearner):
             * max_epochs: An integer indicating the max number of epochs to run the finetuning;
                 we break out of the loop if the validation loss stops improving
             * batch_size: An integer indicating the batch size to use for the finetuning
+            * device: Optional string to specify a device to override base_device
+            * return_finetune_info: A boolean indicating whether to return the training losses
+                and accuracies for the finetuning process
 
-        Returns:
+        Returns (if return_finetune_info is False):
             * eval_metric: The evaluation metric for the given task
-            * eval_loss: A float indicating the loss of the model on the evaluation set 
+            * total_eval_loss: A float indicating the loss of the model on the evaluation set 
+        Returns (if return_finetune_info is True):
+            * eval_metric: The evaluation metric for the given 
+            * total_eval_loss: A float indicating the loss of the model on the evaluation set
+            * finetuning_info: A dictionary containing the following information:
+                * train_losses: A list of training losses for every evaluation step
+                * train_accuracies: A list of training accuracies for every evaluation step
+                * val_losses: A list of validation losses for every evaluation step
+                * val_accuracies: A list of validation accuracies for every evaluation step
         """
 
         assert 'protomaml' not in task_head_init_method,\
             "Protomaml task head initialization is not supported for evaluation"
+        
+        if device is None:
+            device = self.base_device
+
+        self.base_model.to(device)
 
         # Setting up the task head for the task
         with torch.no_grad(): 
@@ -362,6 +381,7 @@ class MAML(BaseMetaLearner):
                 task_type,
                 task_head_init_method,
                 num_classes,
+                device=device
             )
             task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
 
@@ -370,10 +390,12 @@ class MAML(BaseMetaLearner):
         # Training parameters - should not be touched by the user
         MAX_PATIENCE = 5
         EVAL_EVERY_N_STEPS = 100
-        patience = MAX_PATIENCE
+        INITIAL_LR = 1e-5
 
+        patience = MAX_PATIENCE
         best_dev_metric = None
-        dev_batch = move_to_device(finetune_dataset.dev_batch, self.base_device)
+
+        dev_batch = move_to_device(finetune_dataset.dev_batch, device)
 
         # Setting up the optimizer
         finetune_optimizer_param_groups = self.finetune_optimizer_param_groups(
@@ -383,13 +405,17 @@ class MAML(BaseMetaLearner):
             weight_decay_val=0.0
         )
 
-        finetune_optimizer = AdamW(finetune_optimizer_param_groups, lr=1e-5)
+        finetune_optimizer = AdamW(finetune_optimizer_param_groups, lr=INITIAL_LR)
 
         finetune_model.train()
 
         total_step_num = 0
 
         early_exit_training = False
+
+        if return_finetune_info:
+            # Setting up the training info dictionary
+            finetune_info = [] 
 
         for epoch in range(max_epochs):
 
@@ -401,7 +427,7 @@ class MAML(BaseMetaLearner):
                 batch_size=batch_size
             )
 
-            # Finetuning the model on the data in the finetune dataloader 
+            # Finetune the model on the data in the finetune dataloader 
             for finetune_batch in finetune_dataloader:
 
                 if early_exit_training:
@@ -409,7 +435,7 @@ class MAML(BaseMetaLearner):
 
                 finetune_optimizer.zero_grad()
 
-                finetune_batch = move_to_device(finetune_batch, self.base_device)
+                finetune_batch = move_to_device(finetune_batch, device)
 
                 outputs = finetune_model(
                     input_ids=finetune_batch['input_ids'],
@@ -424,7 +450,6 @@ class MAML(BaseMetaLearner):
                 )
 
                 loss.backward()
-
                 finetune_optimizer.step()
 
                 total_step_num += 1
@@ -459,14 +484,17 @@ class MAML(BaseMetaLearner):
                         else:
                             patience -= 1
                             if patience == 0:
-                                early_exit_training=True                      
+                                early_exit_training = True 
 
                         finetune_model.train()
 
-                    logger.info(
-                    f"\t\t step: {total_step_num}, dev loss: {dev_loss}, dev metric: {dev_metric}"
-                    )
-
+                        if return_finetune_info:
+                            finetune_info.append({
+                                'train_loss': loss.item(),
+                                'dev_loss': dev_loss.item(),
+                                'dev_metric': dev_metric,
+                                'step_num': total_step_num
+                            })
         
         # Running full evaluation
         finetune_model.eval()
@@ -485,7 +513,7 @@ class MAML(BaseMetaLearner):
         with torch.no_grad():
 
             for eval_batch in eval_dataloader: 
-                eval_batch = move_to_device(eval_batch, self.base_device)
+                eval_batch = move_to_device(eval_batch, device)
 
                 eval_outputs = finetune_model(
                     input_ids=eval_batch['input_ids'],
@@ -503,11 +531,14 @@ class MAML(BaseMetaLearner):
                 eval_labels.extend(eval_batch['label_ids'].tolist())
 
                 batch_size = eval_logits.size(0)
-                total_eval_loss += eval_loss.item() * batch_size # loss is averaged across batch
+                total_eval_loss += eval_loss.detach().item() * batch_size # loss avg across batch
                 total_eval_samples += batch_size 
 
             total_eval_loss /= total_eval_samples
 
             eval_metric = metric(eval_predictions, eval_labels)
 
-        return (eval_metric, total_eval_loss)
+        if return_finetune_info:
+            return (eval_metric, total_eval_loss, finetune_info)
+        else:
+            return (eval_metric, total_eval_loss)

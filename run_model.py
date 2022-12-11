@@ -14,8 +14,7 @@ parser.add_argument("Path", metavar='path', type=str, help='path to the config f
 parser.add_argument('--run_id', type=str, help="""Unique identifier for the run of the model""")
 args = parser.parse_args()
 
-# ENTRY POINT 
-def main():
+if __name__ == '__main__':
     
     # Setting up an id for the specific run
     if args.run_id is None: 
@@ -47,9 +46,6 @@ def main():
 
     if os.path.exists(run_file_path):
         os.remove(run_file_path)
-
-if __name__ == '__main__':
-    main()
 
 
 
