@@ -118,7 +118,7 @@ class Pipeline(object):
         self.learner = self.load_learner(self.learner_method)
 
         # setting meta learning rate 
-        self.meta_lr = config.getfloat("PIPELINE", "meta_learning_rate", fallback=1e-3)
+        self.meta_lr = config.getfloat("PIPELINE", "meta_lr", fallback=1e-3)
 
         # setting up the optimizer and learning rate scheduler for meta learning
         self.meta_optimizer = self.setup_meta_optimizer()
@@ -135,6 +135,30 @@ class Pipeline(object):
             self.evaluator = Evaluator(config, use_multiple_gpus=self.use_multiple_gpus)
 
     ### -- Initialization helper functions -- ###
+
+    def _log_parameters(self): 
+        """ 
+        Helper functionality for logging out parameters and hyperparameters of the pipeline
+        """ 
+        logger.debug("*"*40)
+        logger.debug("Pipeline Parameters")
+        logger.debug(f"\t General parameters: ")
+        logger.debug(f"\t\t * Max Task Batch Steps: {self.max_task_batch_steps}")
+        logger.debug(f"\t\t * Num Tasks Per Iteration: {self.num_tasks_per_iteration}")
+        logger.debug(f"\t\t * Eval Every N Iteration: {self.eval_every_n_iteration}")
+        logger.debug(f"\t\t * Use Wandb: {self.use_wandb}")
+        logger.debug(f"\t\t * Save Checkpoints: {self.save_checkpoints}")
+        logger.debug(f"\t\t * Use Multiple GPUs: {self.use_multiple_gpus}")
+        logger.debug(f"\t\t * Base Device: {self.base_device}")
+
+        logger.debug(f"\t Optimization parameters: ")
+        logger.debug(f"\t\t * Meta Learning Rate: {self.meta_lr}")
+        logger.debug(f"\t\t * Meta Learning Rate Scheduler: {self.meta_lr_scheduler_method}")
+
+        logger.debug(f"\t Modeling parameters: ")
+        logger.debug(f"\t\t * Learner Method: {self.learner_method}")
+        logger.debug(f"\t\t * Base Model: {self.base_model_name}")
+        logger.debug("*"*40)
 
     def load_checkpoint(self): 
         """
@@ -376,6 +400,7 @@ class Pipeline(object):
         """
 
         ### --------- Inference Mode (no model training) ---------- 
+        self._log_parameters()
 
         if self.mode == "inference":
             logger.info("Running pipeline in inference-only mode")
