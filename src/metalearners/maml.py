@@ -388,8 +388,8 @@ class MAML(BaseMetaLearner):
         finetune_model = copy.deepcopy(self.base_model)
 
         # Training parameters - should not be touched by the user
-        MAX_PATIENCE = 5
-        EVAL_EVERY_N_STEPS = 100
+        MAX_PATIENCE = 3
+        EVAL_EVERY_N_STEPS = 20
         INITIAL_LR = 1e-5
 
         patience = MAX_PATIENCE
@@ -430,9 +430,6 @@ class MAML(BaseMetaLearner):
             # Finetune the model on the data in the finetune dataloader 
             for finetune_batch in finetune_dataloader:
 
-                if early_exit_training:
-                    break
-
                 finetune_optimizer.zero_grad()
 
                 finetune_batch = move_to_device(finetune_batch, device)
@@ -448,11 +445,6 @@ class MAML(BaseMetaLearner):
                     task_head_weights, 
                     task_type=task_type
                 )
-
-                loss.backward()
-                finetune_optimizer.step()
-
-                total_step_num += 1
 
                 if total_step_num % EVAL_EVERY_N_STEPS == 0:
                     # Evaluating the model on the dev set to possbily break out early
@@ -495,7 +487,16 @@ class MAML(BaseMetaLearner):
                                 'dev_metric': dev_metric,
                                 'step_num': total_step_num
                             })
-        
+
+                if early_exit_training:
+                    break
+
+                loss.backward()
+                finetune_optimizer.step()
+
+                total_step_num += 1
+
+
         # Running full evaluation
         finetune_model.eval()
 
