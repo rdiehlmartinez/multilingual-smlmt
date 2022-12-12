@@ -52,12 +52,13 @@ class SharedMemoryBuffer(object):
         Writes data to the buffer 
         """
         self._shared_memory.buf[self._index:self._index+len(data)] = data
+        self._index += len(data)
 
     def read(self, num_bytes: int) -> bytes: 
         """
         Reads num_bytes of data from the buffer
         """
-        data = self._shared_memory.buf[self._index:self._index+num_bytes]
+        data = bytes(self._shared_memory.buf[self._index:self._index+num_bytes])
         self._index += num_bytes
         return data
 
