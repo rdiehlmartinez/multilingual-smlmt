@@ -12,6 +12,7 @@ from collections import defaultdict
 from ..datasets import NLUDataLoader, NLU_TASK_DATA_GENERATOR_MAPPING
 from ..utils import num_gpus
 from ..utils.data import ShuffledIterableDataset
+from ..utils.evaluation import Metric
 
 from wandb.errors import UsageError
 from multiprocessing import Pool, Manager
@@ -24,62 +25,8 @@ from typing import List, Callable, Union, Dict
 from configparser import ConfigParser
 from ..metalearners import BaseLearner
 from ..datasets import NLUDataset
+from ..utils.evaluation import Metric
 
-"""
-Helper classes for the evaluator; define interface for different types of evaluation metrics i.e. 
-accuracy, F1, etc.
-"""
-
-class Metric(object, metaclass=abc.ABCMeta):
-
-    @property
-    @abc.abstractmethod
-    def name(self) -> str:
-        """Name of the metric"""
-        raise NotImplementedError
-
-    @property
-    @abc.abstractmethod
-    def summary(self) -> Callable:
-        """Summary function to use for the metric"""
-        raise NotImplementedError
-
-    @staticmethod
-    @abc.abstractmethod
-    def __call__(self, predictions: List[int], labels: List[int]) -> float:
-        """ 
-        Computes the metric given the predictions and labels
-
-        Args: 
-            predictions: List of predictions
-            labels: List of labels
-
-        Returns: 
-            metric: The metric value
-            
-        """
-        raise NotImplementedError
-
-class AccuracyMetric(Metric): 
-
-    @property
-    def name(self):
-        return "accuracy"
-
-    @property
-    def summary(self):
-        return max
-
-    @staticmethod
-    def __call__(
-        predictions: List[int],
-        labels: List[int]
-    ) -> float:
-        """ 
-        Computes accuracy of predictions for the data of the eval_dataloader
-        """        
-        accuracy = (np.array(predictions) == np.array(labels)).sum()/len(labels)
-        return accuracy
 
 """
 Main evaluator class; orchestrates the evaluation of a model on a variety of NLU tasks

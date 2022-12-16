@@ -19,6 +19,9 @@ from .evaluation import Evaluator
 from .utils import device as DEFAULT_DEVICE, num_gpus
 from .datasets import MetaDataset, MetaDataLoader
 
+# used to get vocab size for model
+from .datasets.train.metadataset import VOCAB_SIZE as XLMR_VOCAB_SIZE
+
 # Importing type hints  
 from configparser import ConfigParser
 from typing import Union
@@ -58,21 +61,6 @@ class Pipeline(object):
         self.use_wandb = config.getboolean('EXPERIMENT', 'use_wandb', fallback=True)
         self.save_checkpoints = config.getboolean("EXPERIMENT", "save_checkpoints", fallback=True)
 
-        # setting up meta dataset for training if provided in config
-        if 'META_DATASET' in config:
-            self.meta_dataset = MetaDataset(config)
-
-            self.return_standard_labels = config.getboolean(
-                "META_DATASET",
-                "return_standard_labels",
-                fallback=False
-            )
-            
-            self.meta_dataloader = MetaDataLoader(
-                self.meta_dataset,
-                return_standard_labels=self.return_standard_labels
-            )
-
         # Setting device 
         self.base_device = config.get("PIPELINE", "device", fallback=DEFAULT_DEVICE)
         self.use_multiple_gpus = self.base_device == torch.device("cuda") and num_gpus > 1
@@ -84,23 +72,6 @@ class Pipeline(object):
         # or starting fresh 
         self.num_task_batches = resume_num_task_batches if resume_num_task_batches else 0
 
-        # setting meta training and evaluation parameters
-        self.num_tasks_per_iteration = self.config.getint(
-            "PIPELINE",
-            "num_tasks_per_iteration",
-            fallback=1
-        )
-        self.eval_every_n_iteration = self.config.getint(
-            "PIPELINE",
-            "eval_every_n_iteration",
-            fallback=0
-        )
-        self.max_task_batch_steps = self.config.getint(
-            "PIPELINE",
-            "max_task_batch_steps",
-            fallback=1
-        )
-
         if self.use_wandb:
             # setting up metrics for logging to wandb
             # counter tracks number of batches of tasks seen by metalearner
@@ -108,6 +79,21 @@ class Pipeline(object):
         
         # Possibly loading in a checkpoint file
         self.checkpoint = self.load_checkpoint()
+    
+        if self.mode == 'train':
+            # Setting up metadataset and meta dataloading (only for training)
+            self.meta_dataset = MetaDataset(config)
+
+            self.use_smlmt_labels = config.getboolean(
+                "LANGUAGE_TASK",
+                "use_smlmt_labels",
+                fallback=False
+            )
+
+            self.meta_dataloader = MetaDataLoader(
+                self.meta_dataset,
+                use_smlmt_labels=self.use_smlmt_labels
+            )
 
         # setting base model 
         self.base_model_name = config.get("BASE_MODEL", "name")
@@ -116,20 +102,39 @@ class Pipeline(object):
         # setting learner 
         self.learner_method = self.config.get("LEARNER", "method")
         self.learner = self.load_learner(self.learner_method)
-
-        # setting meta learning rate 
-        self.meta_lr = config.getfloat("PIPELINE", "meta_lr", fallback=1e-3)
-
-        # setting up the optimizer and learning rate scheduler for meta learning
-        self.meta_optimizer = self.setup_meta_optimizer()
         
-        self.meta_lr_scheduler_method = self.config.get(
-            "PIPELINE",
-            "meta_lr_scheduler_method",
-            fallback=None
-        )
-        self.meta_lr_scheduler = self.setup_meta_lr_scheduler(self.meta_lr_scheduler_method)
-        
+        if self.mode == 'train':
+            # setting meta optimization and training hyper-parameters
+            self.num_tasks_per_iteration = self.config.getint(
+                "PIPELINE",
+                "num_tasks_per_iteration",
+                fallback=1
+            )
+            self.eval_every_n_iteration = self.config.getint(
+                "PIPELINE",
+                "eval_every_n_iteration",
+                fallback=0
+            )
+            self.max_task_batch_steps = self.config.getint(
+                "PIPELINE",
+                "max_task_batch_steps",
+                fallback=1
+            )
+
+            # setting meta learning rate 
+            self.meta_lr = config.getfloat("PIPELINE", "meta_lr", fallback=1e-3)
+
+            # setting up the optimizer and learning rate scheduler for meta learning
+            self.meta_optimizer = self.setup_meta_optimizer()
+            
+            self.meta_lr_scheduler_method = self.config.get(
+                "PIPELINE",
+                "meta_lr_scheduler_method",
+                fallback=None
+            )
+            self.meta_lr_scheduler = self.setup_meta_lr_scheduler(self.meta_lr_scheduler_method)
+
+
         # setting evaluator 
         if 'EVALUATION' in config:
             self.evaluator = Evaluator(config, use_multiple_gpus=self.use_multiple_gpus)
@@ -143,17 +148,18 @@ class Pipeline(object):
         logger.debug("*"*40)
         logger.debug("Pipeline Parameters")
         logger.debug(f"\t General parameters: ")
-        logger.debug(f"\t\t * Max Task Batch Steps: {self.max_task_batch_steps}")
-        logger.debug(f"\t\t * Num Tasks Per Iteration: {self.num_tasks_per_iteration}")
-        logger.debug(f"\t\t * Eval Every N Iteration: {self.eval_every_n_iteration}")
         logger.debug(f"\t\t * Use Wandb: {self.use_wandb}")
         logger.debug(f"\t\t * Save Checkpoints: {self.save_checkpoints}")
         logger.debug(f"\t\t * Use Multiple GPUs: {self.use_multiple_gpus}")
         logger.debug(f"\t\t * Base Device: {self.base_device}")
 
-        logger.debug(f"\t Optimization parameters: ")
-        logger.debug(f"\t\t * Meta Learning Rate: {self.meta_lr}")
-        logger.debug(f"\t\t * Meta Learning Rate Scheduler: {self.meta_lr_scheduler_method}")
+        if self.mode == "train":
+            logger.debug(f"\t Training parameters: ")
+            logger.debug(f"\t\t * Meta Learning Rate: {self.meta_lr}")
+            logger.debug(f"\t\t * Meta Learning Rate Scheduler: {self.meta_lr_scheduler_method}")
+            logger.debug(f"\t\t * Max Task Batch Steps: {self.max_task_batch_steps}")
+            logger.debug(f"\t\t * Num Tasks Per Iteration: {self.num_tasks_per_iteration}")
+            logger.debug(f"\t\t * Eval Every N Iterations: {self.eval_every_n_iteration}")
 
         logger.debug(f"\t Modeling parameters: ")
         logger.debug(f"\t\t * Learner Method: {self.learner_method}")
@@ -190,7 +196,9 @@ class Pipeline(object):
     def load_model(self, base_model_name: str) -> torch.nn.Module:
         """
         Helper function for reading in base model, should be intialized with the 
-        from_kwargs() class method 
+        from_kwargs() class method. NOTE: We curently only support XLM-R models. To change this 
+        requires adding a new model class and slightly reworking the metadataset class to use 
+        a different type of tokenizer.
 
         Args: 
             * base_model_name (str): name of base model to load
@@ -210,9 +218,6 @@ class Pipeline(object):
 
         model = model_cls.from_kwargs(**model_kwargs)
 
-        logger.debug("Base Model Architecture: ")
-        logger.debug(model)
-
         return model
 
     def load_learner(self, learner_method: str) -> Union[MAML, BaselineLearner]:
@@ -231,16 +236,12 @@ class Pipeline(object):
         learner_kwargs = dict(self.config.items("LEARNER"))
         del learner_kwargs['method']
 
-        if hasattr(self, "return_standard_labels") and self.return_standard_labels: 
-            # The final classification layer of the learner is over the entire vocab,
-            # thus cannot infer the size of the classication layer from the LANGUAGE_TASK config
-            assert("lm_head_n" in learner_kwargs),\
-                "Must defined lm_head_n in LEARNER config (cannot be inferred)"
-        else: 
-            # NOTE: If not defined, size of lm head classification task is taken from LANGUAGE_TASK
-            if "lm_head_n" not in learner_kwargs:
-                logger.info("Attempting to infer lm_head_n from LANGUAGE_TASK config")
+        if self.mode == "train":
+            if self.use_smlmt_labels: 
                 learner_kwargs['lm_head_n'] = self.config.getint("LANGUAGE_TASK", "n")
+            else:
+                # size of the tokenizer vocab; NOTE that we currently only support XLM-R
+                learner_kwargs['lm_head_n'] = XLMR_VOCAB_SIZE
 
         if learner_method == 'maml':
             learner_cls = MAML
@@ -379,7 +380,8 @@ class Pipeline(object):
         a step on the meta learning rate scheduler.
 
         Args: 
-            * grad_norm_constant (int): value to normalize gradients by
+            * grad_norm_constant (int): value to normalize gradients by; typically the number of
+                tasks in the current task batch
         """
 
         for param_group in self.learner.outerloop_optimizer_param_groups():
@@ -399,8 +401,9 @@ class Pipeline(object):
         on data stored in self.meta_dataloader
         """
 
-        ### --------- Inference Mode (no model training) ---------- 
         self._log_parameters()
+
+        ### --------- Inference Mode (no model training) ---------- 
 
         if self.mode == "inference":
             logger.info("Running pipeline in inference-only mode")
