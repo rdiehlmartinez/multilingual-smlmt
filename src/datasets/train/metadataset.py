@@ -28,15 +28,18 @@ logger = logging.getLogger(__name__)
 # to stop the huggingface tokenizer from giving the sequence longe than 512 warning 
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
+# NOTE: Currently assuming that we always use the XLM-Roberta tokenizer
+
 # We always use the XLM sentencepiece tokenizer
 tokenizer = XLMRobertaTokenizer.from_pretrained('xlm-roberta-base')
 MASK_TOKEN_ID = tokenizer.mask_token_id 
 SPECIAL_TOKEN_IDS = tokenizer.all_special_ids
+VOCAB_SIZE = tokenizer.vocab_size
 
 # to encode any token id we need BYTE_ENCODING_SIZE number of bytes (hex encoding)
 BYTE_ENCODING_SIZE = math.ceil(math.log(tokenizer.vocab_size + 1, 16)) 
 BYTE_ENDIAN_MODE = 'big'
-BYTE_END_MARKER = tokenizer.vocab_size.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE)
+BYTE_END_MARKER = VOCAB_SIZE.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE)
 
 class SharedMemoryBuffer(object): 
     """
@@ -51,6 +54,7 @@ class SharedMemoryBuffer(object):
         """
         Writes data to the buffer 
         """
+
         self._shared_memory.buf[self._index:self._index+len(data)] = data
         self._index += len(data)
 
@@ -224,9 +228,12 @@ class IterableLanguageTaskDataset(object):
             * query_samples {token_id : [Q samples of token_id masked out]}: Mapping of 
                 N different token_ids to Q samples of sentences where the token is masked out.
         """
-        if self.event.is_set():
+
+        while self.event.is_set():
             # self.event should not be set - this can only happen on class initialization if the 
-            # worker node is not fast enough to beat the main node to acquire the lock 
+            # worker node is not fast enough to beat the main node to acquire the lock; in this
+            # case we wait for the worker node to start and flag it has finished by clearing the 
+            # event flag (should only happen once at start of training)
             time.sleep(1) 
 
         self.lock.acquire()
@@ -461,7 +468,7 @@ class IterableLanguageTaskDataset(object):
 
         # This lock is acquired when worker is initially launched
         self.lock.acquire()
-
+        
         # keeps track of edge case where the entire dataset is smaller than self.sample_size
         is_too_small = False 
         total_samples_processed = 0 
@@ -666,9 +673,10 @@ class MetaDataset(IterableDataset):
             dataset_size = compute_dataset_size(lng_root_fp)
 
             language_task_kwargs = dict(config.items('LANGUAGE_TASK'))
-            if config.getboolean("LEARNER", "use_multiple_samples", fallback=True):
-                language_task_kwargs['num_task_samples'] = \
-                    config.getint("LEARNER", "num_innerloop_steps")
+
+            if "num_task_samples" in language_task_kwargs: 
+                assert(config.getboolean("LEARNER", "use_multiple_samples") is True), \
+                    "num_task_samples should only be specified if use_multiple_samples is True"
 
             dataset = IterableLanguageTaskDataset(
                 lng_root_fp,
