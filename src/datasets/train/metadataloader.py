@@ -17,18 +17,18 @@ SupportQueryBatch =  Tuple[List[RawDataBatch], RawDataBatch]
 
 class MetaCollator(object):
 
-    def __init__(self, return_standard_labels: bool) -> None:
+    def __init__(self, use_smlmt_labels: bool) -> None:
         """ 
         Helper class to define a collate function. In order to supply additional arguments to 
         the function, we wrap the function in this class and pass in params via instance attributes.
 
         Args:
-            * return_standard_labels (bool): Whether to collate the batch to use the token ids of 
-                the masked tokens, or whether to transform the labels to be in range [0, n]. 
+            * use_smlmt_labels (bool): Whether to transform the labels to be in range [0, n] or
+                whether to collate the batch to use the token ids of the masked token. 
                 Typically we don't want to return the standard labels - the main use case is to 
                 prepare batches of data for models that don't use meta learning methods.
         """
-        self.return_standard_labels = return_standard_labels
+        self.use_smlmt_labels = use_smlmt_labels
 
     def __call__(
         self,
@@ -65,10 +65,10 @@ class MetaCollator(object):
         task_name, (support_samples_list, query_samples) = lm_task_samples[0]
 
         support_batch_list = [
-            base_collate_fn(support_samples, self.return_standard_labels)
+            base_collate_fn(support_samples, self.use_smlmt_labels)
             for support_samples in support_samples_list
         ]    
-        query_batch = base_collate_fn(query_samples, self.return_standard_labels)
+        query_batch = base_collate_fn(query_samples, self.use_smlmt_labels)
 
         return (task_name, support_batch_list, query_batch)
     
@@ -85,7 +85,7 @@ class MetaDataLoader(DataLoader):
     def __init__(
         self,
         dataset: MetaDataset,
-        return_standard_labels: bool = False,
+        use_smlmt_labels: bool = False,
         batch_size: int = 1,
         shuffle: bool = False,
         sampler: Any = None,
@@ -99,7 +99,7 @@ class MetaDataLoader(DataLoader):
                 
         """ Resetting basic defaults  """
 
-        meta_collator = MetaCollator(return_standard_labels=return_standard_labels)
+        meta_collator = MetaCollator(use_smlmt_labels=use_smlmt_labels)
 
         super().__init__(
             dataset, 

@@ -8,6 +8,7 @@ import numpy as np
 import random
 import wandb
 import json
+import multiprocessing as mp
 
 from configparser import ConfigParser
 
@@ -58,29 +59,34 @@ def setup_wandb(config: ConfigParser, run_id: str, resume_training: bool) -> Non
     """
     if config.getboolean('EXPERIMENT', 'use_wandb', fallback=True):
         dict_config = json.loads(json.dumps(config._sections))
-        wandb.init(project='Multilingual-SMLMT',
-                   entity="problyglot",
-                   config=dict_config,
-                   id=run_id,
-                   resume="must" if resume_training else None
-                   )
-        if resume_training:
-            logging.info(f"Resuming run with id: {run_id}")
-        else: 
-            logging.info(f"Starting run with id: {run_id}")
+        wandb.init(
+            project='Multilingual-SMLMT',
+            entity="problyglot",
+            config=dict_config,
+            id=run_id,
+            resume="must" if resume_training else None,
+        )
 
 def setup(config_file_path: str, run_id: str, resume_num_task_batches: int) -> ConfigParser:
     """
     Reads in config file, sets up logger and sets a seed to ensure reproducibility.
 
-    NOTE: The optional keyword arguments (resume_run_id and resume_num_task_batches) should never
+    NOTE: The optional keyword arguments (run_id and resume_num_task_batches) should never
     be manually set, rather they are passed in automatically by the program if it encounters a 
     time expiration error and thus spawns a new job to continue running the program.
     """
+
+    # setting the start method to spawn to avoid issues with CUDA and WandB
+    mp.set_start_method("spawn")
+
     config = setup_config(config_file_path)
 
     # we are resuming training if resume_num_task_batches is greater than 0
     resume_training = resume_num_task_batches > 0 
+    if resume_training:
+       logging.info(f"Resuming run with id: {run_id}")
+    else: 
+        logging.info(f"Starting run with id: {run_id}")
 
     setup_logger(config_file_path)
     setup_wandb(config, run_id, resume_training)
@@ -95,4 +101,5 @@ def setup(config_file_path: str, run_id: str, resume_num_task_batches: int) -> C
     
     config["EXPERIMENT"]["seed"] = str(seed)
     set_seed(seed)
+
     return config

@@ -10,20 +10,19 @@ import os
 import re 
 import time
 
-from multiprocessing.queues import Empty as EmptyQueue
 from collections import OrderedDict
 
 import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 
+from ..datasets import NLUDataLoader
 from ..taskheads import TaskHead, ClassificationHead
-from ..utils import set_seed
 
 # imports for typing 
+from ..datasets import NLUDataset
 from ..models import BaseModel
 from typing import Tuple, List, Dict, Union, Any, Iterator
-from multiprocessing import Queue, Event
+from ..utils.data import ShuffledIterableDataset
+from ..utils.evaluation import Metric
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +73,9 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         if self.retain_lm_head: 
             # If we only keep a single task head, then there is no obvious way how to initialize 
-            # the task head with protomaml 
-            assert("protomaml" not in self.lm_head_init_method),\
-                "retain_task_head cannot be used with protomaml lm head initialization"
+            # the task head with protomaml (should just be random initialization)
+            assert("random" in self.lm_head_init_method),\
+                "retain_task_head can only be set to True if lm_head_init_method is 'random'"
             init_kwargs = self.get_task_init_kwargs(
                 'classification',
                 self.lm_head_init_method,
@@ -189,16 +188,78 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         return (logits, loss)
 
-    @property
-    @abc.abstractmethod
     def outerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
         """
         Returns the parameter groups that are learnable during the outer loop - i.e. the global 
         parameters of the model (this is in contrast to the inner loop parameteres). 
         Note, however, that we might not have any inner loop parameters that need to be optimized 
         (such as in the case of the baseline model), thus only this method needs to be implemented.
+
+        Returns: 
+            * param_groups (list): List of parameter groups that are learnable during the 
+                outer loop
         """
-        raise NotImplementedErrorxw
+        param_groups = [
+            {
+                'params': [p for p in self.base_model.parameters() if p.requires_grad],
+            }, 
+        ]
+
+        if self.retain_lm_head:
+            param_groups.append(
+                {
+                    'params': self.retained_lm_head_weights.values()
+                }
+            )
+
+        return param_groups
+
+    @staticmethod
+    def finetune_optimizer_param_groups(
+        base_model: torch.nn.Module,
+        task_head_weights: Dict[str, torch.nn.Parameter],
+        add_decay_information: bool = True,
+        weight_decay_val: float = 0.0,
+    ) -> Iterator[Dict[str, torch.nn.Parameter]]:
+        """
+        Iterator that returns the parameters of the passed in base_model and the task head weights
+
+        Args:
+            * base_model: The base model that we are extracting parameters from
+            * task_head_weights: The weights of the task head that we are extracting parameters
+                from
+            * add_decay_information: Whether to add weight decay information to the parameters
+            * weight_decay_val: The weight decay value to use for the parameters
+        Returns:
+            * param_group: A list of dictionaries containing the parameters of the base_model and 
+                the task head weights
+        """
+
+        no_decay = ["bias", "LayerNorm.weight"]
+        param_groups = []
+
+        for param_name, param in base_model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            param_group = {
+                "params": param,
+            }
+            
+            if add_decay_information: 
+                if any(nd in param_name for nd in no_decay):
+                    param_group["weight_decay"] = 0.0
+                else: 
+                    param_group["weight_decay"] = weight_decay_val
+
+            param_groups.append(param_group)
+        
+        param_groups.append({
+            'params': task_head_weights.values(),
+            'weight_decay': 0.0
+        })
+
+        return param_groups
 
     @abc.abstractmethod
     def run_train_loop(
@@ -230,7 +291,232 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         """
         raise NotImplementedError()
 
-    # ###### Model evaluation methods ######
+
+    def run_evaluation(
+        self, 
+        finetune_dataset: ShuffledIterableDataset,
+        eval_dataset: NLUDataset,
+        metric: Metric,
+        task_type: str, 
+        task_head_init_method: str,
+        num_classes: int,
+        max_epochs: int = 10,
+        batch_size: int = 256,
+        device: torch.device = None,
+        return_finetune_info: bool = True,
+    ) -> Union[Tuple[float, float], Tuple[float, float, Dict[str, List[float]]]]:
+        """
+        Runs finetuning of the model on the support set data stored in the support_dataloader,
+        and then evaluates the model on the eval_dataloader.
+
+        Args: 
+            * finetune_dataset: An NLU Dataset containing the data for finetuning the
+                pre-trained model on a given NLU task
+            * eval_dataset: An NLU Dataset containing the evaluation set data for the given NLU 
+                task
+            * metric: A callable metric instance that uses the finetuned model to compute the
+                target evaluation metric on the eval_dataloader
+            * task_type: A string indicating the type of task (e.g. 'classification', 'qa', etc.)
+            * task_head_init_method: A string indicating the method used to initialize the task
+                head weights
+            * num_classes: An integer indicating the number of classes in the task
+            * max_epochs: An integer indicating the max number of epochs to run the finetuning;
+                we break out of the loop if the validation loss stops improving
+            * batch_size: An integer indicating the batch size to use for the finetuning
+            * device: Optional string to specify a device to override base_device
+            * return_finetune_info: A boolean indicating whether to return the training losses
+                and accuracies for the finetuning process
+
+        Returns (if return_finetune_info is False):
+            * eval_metric: The evaluation metric for the given task
+            * total_eval_loss: A float indicating the loss of the model on the evaluation set 
+        Returns (if return_finetune_info is True):
+            * eval_metric: The evaluation metric for the given 
+            * total_eval_loss: A float indicating the loss of the model on the evaluation set
+            * finetuning_info: A dictionary containing the following information:
+                * train_losses: A list of training losses for every evaluation step
+                * train_accuracies: A list of training accuracies for every evaluation step
+                * val_losses: A list of validation losses for every evaluation step
+                * val_accuracies: A list of validation accuracies for every evaluation step
+        """
+        
+        assert 'protomaml' not in task_head_init_method,\
+            "Protomaml task head initialization is not supported for evaluation"
+        
+        if device is None:
+            device = self.base_device
+
+        self.base_model.to(device)
+
+        # Setting up the task head for the task
+        with torch.no_grad(): 
+            init_kwargs = self.get_task_init_kwargs(
+                task_type,
+                task_head_init_method,
+                num_classes,
+                device=device
+            )
+            task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
+
+        finetune_model = copy.deepcopy(self.base_model)
+
+        # Training parameters - should not be touched by the user
+        MAX_PATIENCE = 3
+        EVAL_EVERY_N_STEPS = 20
+        INITIAL_LR = 1e-5
+
+        patience = MAX_PATIENCE
+        best_dev_metric = None
+
+        dev_batch = move_to_device(finetune_dataset.dev_batch, device)
+
+        # Setting up the optimizer
+        finetune_optimizer_param_groups = self.finetune_optimizer_param_groups(
+            finetune_model,
+            task_head_weights,
+            add_decay_information=True,
+            weight_decay_val=0.0
+        )
+
+        finetune_optimizer = AdamW(finetune_optimizer_param_groups, lr=INITIAL_LR)
+
+        finetune_model.train()
+
+        total_step_num = 0
+
+        early_exit_training = False
+
+        if return_finetune_info:
+            # Setting up the training info dictionary
+            finetune_info = [] 
+
+        for epoch in range(max_epochs):
+
+            if early_exit_training:
+                break
+            
+            finetune_dataloader = NLUDataLoader(
+                finetune_dataset,
+                batch_size=batch_size
+            )
+
+            # Finetune the model on the data in the finetune dataloader 
+            for finetune_batch in finetune_dataloader:
+
+                finetune_optimizer.zero_grad()
+
+                finetune_batch = move_to_device(finetune_batch, device)
+
+                outputs = finetune_model(
+                    input_ids=finetune_batch['input_ids'],
+                    attention_mask=finetune_batch['attention_mask']
+                )
+
+                _, loss = self._compute_task_loss(
+                    outputs,
+                    finetune_batch,
+                    task_head_weights, 
+                    task_type=task_type
+                )
+
+                if total_step_num % EVAL_EVERY_N_STEPS == 0:
+                    # Evaluating the model on the dev set to possbily break out early
+                    with torch.no_grad():
+                        finetune_model.eval()
+
+                        outputs = finetune_model(
+                            input_ids=dev_batch['input_ids'],
+                            attention_mask=dev_batch['attention_mask']
+                        )
+
+                        dev_logits, dev_loss = self._compute_task_loss(
+                            outputs,
+                            dev_batch,
+                            task_head_weights,
+                            task_type=task_type
+                        )
+                        
+                        dev_predictions = torch.argmax(dev_logits, dim=-1).tolist()
+                        dev_labels = dev_batch['label_ids'].tolist()
+
+                        dev_metric = metric(dev_predictions, dev_labels)
+
+                        if best_dev_metric is None or \
+                            metric.summary(dev_metric, best_dev_metric) == dev_metric:
+
+                            best_dev_metric = dev_metric
+                            patience = MAX_PATIENCE
+                        else:
+                            patience -= 1
+                            if patience == 0:
+                                early_exit_training = True 
+
+                        finetune_model.train()
+
+                        if return_finetune_info:
+                            finetune_info.append({
+                                'train_loss': loss.item(),
+                                'dev_loss': dev_loss.item(),
+                                'dev_metric': dev_metric,
+                                'step_num': total_step_num
+                            })
+
+                if early_exit_training:
+                    break
+
+                loss.backward()
+                finetune_optimizer.step()
+
+                total_step_num += 1
+
+
+        # Running full evaluation
+        finetune_model.eval()
+
+        eval_labels = []
+        eval_predictions = []
+    
+        total_eval_loss = 0.0
+        total_eval_samples = 0
+
+        eval_dataloader = NLUDataLoader(
+            eval_dataset,
+            batch_size=batch_size
+        )
+
+        with torch.no_grad():
+
+            for eval_batch in eval_dataloader: 
+                eval_batch = move_to_device(eval_batch, device)
+
+                eval_outputs = finetune_model(
+                    input_ids=eval_batch['input_ids'],
+                    attention_mask=eval_batch['attention_mask'],
+                )
+
+                eval_logits, eval_loss = self._compute_task_loss(
+                    eval_outputs, 
+                    eval_batch,
+                    task_head_weights,
+                    task_type=task_type
+                )
+
+                eval_predictions.extend(torch.argmax(eval_logits, dim=-1).tolist())
+                eval_labels.extend(eval_batch['label_ids'].tolist())
+
+                batch_size = eval_logits.size(0)
+                total_eval_loss += eval_loss.detach().item() * batch_size # loss avg across batch
+                total_eval_samples += batch_size 
+
+            total_eval_loss /= total_eval_samples
+
+            eval_metric = metric(eval_predictions, eval_labels)
+
+        if return_finetune_info:
+            return (eval_metric, total_eval_loss, finetune_info)
+        else:
+            return (eval_metric, total_eval_loss)
+
 
 class BaseMetaLearner(BaseLearner):
 
@@ -295,25 +581,13 @@ class BaseMetaLearner(BaseLearner):
 
     ### Base setup functionality for meta learning models
 
-    def base_model_param_group_iterator(
-        self,
-        base_model: torch.nn.Module,
-        require_grad: bool = True,
-        add_lr: bool = True,
-        cast_lr_to_float: bool = False,
-        return_param_name: bool = False,
-    ) -> Tuple[str, Iterator[Dict[str, torch.nn.Parameter]]]:
+    def innerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
         """ 
-        Iterator that returns the parameters of the passed in base_model 
+        Returns the parameter groups that are passed to the innerloop (diferentiable) optimizer.
 
-        Args: 
-            * base_model: The base model that we are extracting parameters from
-            * require_grad: Whether the parameters should require gradients
-            * add_lr: Whether the parameters should have a learning rate associated with them
-            * cast_lr_to_float: Whether to cast the learning rate to a float. This is useful if
-                we want to use the learning rate as a hyperparameter in the inner loop optimizer.
         Yields: 
-            * param_group: A dictionary containing the parameters of the base_model
+            * param_groups: A list of dictionaries containing the parameters and learning rates
+                for each parameter group
         """
         
         def extract_layer_num(layer_name): 
@@ -328,116 +602,43 @@ class BaseMetaLearner(BaseLearner):
             else: 
                 return None
 
-        for idx, (name, param) in enumerate(base_model.named_parameters()): 
-            if not param.requires_grad and require_grad:
+        param_groups = []
+
+        for name, param in self.base_model.named_parameters(): 
+            if not param.requires_grad:
                 continue
 
             param_group = { 
                 "params": param,
             }
 
-            if add_lr:
-                layer_num = extract_layer_num(name)
-                if layer_num is None: 
-                    raise Exception(
-                        "Could not find an innerloop learning rate for param: {}".format(name)
-                    )
+            layer_num = extract_layer_num(name)
+            if layer_num is None: 
+                raise Exception(
+                    "Could not find an innerloop learning rate for param: {}".format(name)
+                )
 
-                layer_lr = self.inner_layers_lr[layer_num]
-
-                param_group['lr'] = layer_lr.item() if cast_lr_to_float else layer_lr
-
-            if return_param_name: 
-                yield (name, param_group)
-            else:
-                yield param_group
-
-
-    def finetune_optimizer_param_groups(
-        self, 
-        base_model: torch.nn.Module,
-        task_head_weights: Dict[str, torch.nn.Parameter],
-        add_decay_information: bool = True,
-        weight_decay_val: float = 0.0,
-    ) -> Iterator[Dict[str, torch.nn.Parameter]]:
-        """
-        Iterator that returns the parameters of the passed in base_model and the task head weights
-
-        Args:
-            * base_model: The base model that we are extracting parameters from
-            * task_head_weights: The weights of the task head that we are extracting parameters
-                from
-            * add_decay_information: Whether to add weight decay information to the parameters
-            * weight_decay_val: The weight decay value to use for the parameters
-        Returns:
-            * param_group: A list of dictionaries containing the parameters of the base_model and 
-                the task head weights
-        """
-
-        no_decay = ["bias", "LayerNorm.weight"]
-
-        param_groups = []
-
-        # NOTE: We are not using the learning rates that we've learned in the inner loop; if 
-        # we want to do this just set add_lr to True
-
-        for param_name, param_group in self.base_model_param_group_iterator(
-            base_model, 
-            require_grad=True,
-            add_lr=False,
-            return_param_name=True,
-        ): 
-
-            if add_decay_information: 
-                if any(nd in param_name for nd in no_decay):
-                    param_group["weight_decay"] = 0.0
-                else: 
-                    param_group["weight_decay"] = weight_decay_val
+            param_group['lr'] = self.inner_layers_lr[layer_num]
 
             param_groups.append(param_group)
-
-        param_groups.append({
-            'params': task_head_weights.values(),
-            'weight_decay': 0.0
-        })
-
+        
         return param_groups
-
-
-    def innerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]: 
-        """
-        Returns the parameter groups that are passed to the innerloop (diferentiable) optimizer.
-        """
-        return list(self.base_model_param_group_iterator(
-            self.base_model,
-            require_grad=True,
-            add_lr=True,
-            cast_lr_to_float=False, # we want lr to be learnable parameters
-            return_param_name=False,
-        ))
             
     def outerloop_optimizer_param_groups(self) -> Iterator[Dict[str, torch.nn.Parameter]]:
         """
-        Returns the parameter groups that are passed to the outerloop optimizer.            
+        Returns the parameter groups that are passed to the outerloop optimizer, extends the 
+        base behavior by adding in the learnable inner-loop learning rates.         
         """
         
-        param_groups = [
-            {
-                'params': [p for p in self.base_model.parameters() if p.requires_grad],
-            }, 
+        param_groups = super().outerloop_optimizer_param_groups()
+
+        param_groups.extend([
             {
                 'params': self.inner_layers_lr.values(),
             },
             {
                 'params': [self.classifier_lr],
             }
-        ]
-
-        if self.retain_lm_head:
-            params_groups.append(
-                {
-                    'params': self.retained_lm_head_weights.values()
-                }
-            )
+        ])
 
         return param_groups

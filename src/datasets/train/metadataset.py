@@ -4,14 +4,16 @@ __author__ = 'Richard Diehl Martinez'
 import os
 import torch 
 import gzip
-import multiprocessing
-import mmap
+#import mmap
 import random
 import time
 import logging
 import math
 import copy 
 import numpy as np
+
+import multiprocessing as mp 
+from multiprocessing.shared_memory import SharedMemory
 
 from torch.utils.data import IterableDataset
 from transformers import XLMRobertaTokenizer
@@ -26,15 +28,57 @@ logger = logging.getLogger(__name__)
 # to stop the huggingface tokenizer from giving the sequence longe than 512 warning 
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
+# NOTE: Currently assuming that we always use the XLM-Roberta tokenizer
+
 # We always use the XLM sentencepiece tokenizer
 tokenizer = XLMRobertaTokenizer.from_pretrained('xlm-roberta-base')
 MASK_TOKEN_ID = tokenizer.mask_token_id 
 SPECIAL_TOKEN_IDS = tokenizer.all_special_ids
+VOCAB_SIZE = tokenizer.vocab_size
 
 # to encode any token id we need BYTE_ENCODING_SIZE number of bytes (hex encoding)
 BYTE_ENCODING_SIZE = math.ceil(math.log(tokenizer.vocab_size + 1, 16)) 
 BYTE_ENDIAN_MODE = 'big'
-BYTE_END_MARKER = tokenizer.vocab_size.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE)
+BYTE_END_MARKER = VOCAB_SIZE.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE)
+
+class SharedMemoryBuffer(object): 
+    """
+    Data buffer that uses shared memory to store the data, and which can be pickled. Implements 
+    some of the same methods as the mmap module, but is not a drop-in replacement.
+    """
+    def __init__(self, size): 
+        self._shared_memory = SharedMemory(create=True, size=size)
+        self._index = 0 
+    
+    def write(self, data: bytes) -> None: 
+        """
+        Writes data to the buffer 
+        """
+
+        self._shared_memory.buf[self._index:self._index+len(data)] = data
+        self._index += len(data)
+
+    def read(self, num_bytes: int) -> bytes: 
+        """
+        Reads num_bytes of data from the buffer
+        """
+        data = bytes(self._shared_memory.buf[self._index:self._index+num_bytes])
+        self._index += num_bytes
+        return data
+
+    def seek(self, index: int) -> None: 
+        """
+        Sets the index to read and write from
+        """ 
+        self._index = index
+
+    def shutdown(self) -> None: 
+        """
+        Unlinks and closes the shared memory buffer
+        """
+        self._shared_memory.unlink()
+        self._shared_memory.close()
+
 
 class IterableLanguageTaskDataset(object): 
     ''' 
@@ -119,14 +163,14 @@ class IterableLanguageTaskDataset(object):
             self.max_seq_len = tokenizer.max_len_single_sentence
 
         # event and lock to communicate between parent and child 
-        self.event = multiprocessing.Event()
-        self.lock = multiprocessing.Lock()
+        self.event = mp.Event()
+        self.lock = mp.Lock()
 
         # Extract data out of the buffers for support and query
-        self.support_data_buffer = mmap.mmap(-1, length=buffer_size)
-        self.query_data_buffer = mmap.mmap(-1, length=buffer_size)
-        
-        self.worker = multiprocessing.Process(
+        self.support_data_buffer = SharedMemoryBuffer(buffer_size)
+        self.query_data_buffer = SharedMemoryBuffer(buffer_size)
+
+        self.worker = mp.Process(
             target=self.generate_buffer,
             args=(seed,)
         )
@@ -140,6 +184,8 @@ class IterableLanguageTaskDataset(object):
 
     def shutdown(self) -> None:
         """ Needs to be called in order to terminate the data generation worker """
+        self.support_data_buffer.shutdown()
+        self.query_data_buffer.shutdown()
         self.worker.terminate()
         self.worker.join()
 
@@ -182,9 +228,12 @@ class IterableLanguageTaskDataset(object):
             * query_samples {token_id : [Q samples of token_id masked out]}: Mapping of 
                 N different token_ids to Q samples of sentences where the token is masked out.
         """
-        if self.event.is_set():
+
+        while self.event.is_set():
             # self.event should not be set - this can only happen on class initialization if the 
-            # worker node is not fast enough to beat the main node to acquire the lock 
+            # worker node is not fast enough to beat the main node to acquire the lock; in this
+            # case we wait for the worker node to start and flag it has finished by clearing the 
+            # event flag (should only happen once at start of training)
             time.sleep(1) 
 
         self.lock.acquire()
@@ -361,14 +410,17 @@ class IterableLanguageTaskDataset(object):
         return (support_set, query_set)
 
     @staticmethod
-    def write_to_buffer(curr_set: Dict[int, List[List[int]]], curr_buffer: mmap.mmap) -> None: 
+    def write_to_buffer(
+        curr_set: Dict[int, List[List[int]]],
+        curr_buffer: SharedMemoryBuffer
+    ) -> None: 
         """ 
         For the support and query set, write the data out to the respective buffers 
         
         Args:
             * curr_set {token id: [K samples where token id occurs]}: mapping of N token ids
                 to K samples per token id occurs
-            * curr_buffer (mmap.mmap): buffer to write the data to
+            * curr_buffer (SharedMemoryBuffer): buffer to write the data to
         """
         for subword_id, samples in curr_set.items():
             curr_buffer.write(subword_id.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE))
@@ -379,8 +431,7 @@ class IterableLanguageTaskDataset(object):
                     curr_buffer.write(encoded_token_id)
                 curr_buffer.write(BYTE_END_MARKER)
             
-        curr_buffer.flush()
-
+        
     def release_and_wait(self) -> None:
         """
         NOTE: This should only ever be run by a child worker.
@@ -417,7 +468,7 @@ class IterableLanguageTaskDataset(object):
 
         # This lock is acquired when worker is initially launched
         self.lock.acquire()
-
+        
         # keeps track of edge case where the entire dataset is smaller than self.sample_size
         is_too_small = False 
         total_samples_processed = 0 
@@ -622,9 +673,10 @@ class MetaDataset(IterableDataset):
             dataset_size = compute_dataset_size(lng_root_fp)
 
             language_task_kwargs = dict(config.items('LANGUAGE_TASK'))
-            if config.getboolean("LEARNER", "use_multiple_samples", fallback=True):
-                language_task_kwargs['num_task_samples'] = \
-                    config.getint("LEARNER", "num_innerloop_steps")
+
+            if "num_task_samples" in language_task_kwargs: 
+                assert(config.getboolean("LEARNER", "use_multiple_samples") is True), \
+                    "num_task_samples should only be specified if use_multiple_samples is True"
 
             dataset = IterableLanguageTaskDataset(
                 lng_root_fp,

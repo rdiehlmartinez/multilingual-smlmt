@@ -38,7 +38,7 @@ def move_to_device(
 
 def base_collate_fn(
     batch: Union[List[Tuple[int, List[int]]], Dict[int, List[List[int]]]],
-    return_standard_labels: bool
+    use_smlmt_labels: bool
 ) -> Dict[str, torch.Tensor]:
     """
     Base functionality for collating a batch of samples. Is used to both generate batches of 
@@ -47,9 +47,9 @@ def base_collate_fn(
     Args: 
         * batch: Either a dictionary or a list of tuples that can be iterated over and 
             yields a tuple containing a label and samples corresponding to a label.
-        * return_standard_labels (bool): Whether to collate the batch to use the label passed 
-            along with the batch, or whether to transform the labels to be in range [0, n]. Only 
-            relevant for meta-training; for NLU tasks this should always be True.
+        * use_smlmt_labels (bool): Whether to transform the labels to be in range [0, n] or
+                whether to collate the batch to use the token ids of the masked token. Only 
+                relevant for meta-training; for NLU tasks this should always be True.
 
     Returns:
         * processed_batch (dict): Dictionary containing the following: 
@@ -85,10 +85,10 @@ def base_collate_fn(
 
         for sample in samples:
 
-            if return_standard_labels:
-                batch_labels.append(label)
+            if use_smlmt_labels:
+                batch_labels.append(idx)    
             else:
-                batch_labels.append(idx) 
+                batch_labels.append(label)
                 
             if len(sample) > batch_max_seq_len:
                 batch_max_seq_len = len(sample)
@@ -184,7 +184,7 @@ class ShuffledIterableDataset(torch.utils.data.IterableDataset):
             if idx in hold_out_idxs:
                 dev_batch.append(curr_sample)
 
-        dev_batch = base_collate_fn(dev_batch, return_standard_labels=True)
+        dev_batch = base_collate_fn(dev_batch, use_smlmt_labels=False)
 
         return (hold_out_idxs, dev_batch)
 
