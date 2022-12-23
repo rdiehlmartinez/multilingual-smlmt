@@ -206,8 +206,6 @@ class Pipeline(object):
         Returns:
             * model (torch.nn.Module): base model to be used for meta learning
         """
-
-        logger.info(f"Loading base model: {base_model_name}")
         model_kwargs = dict(self.config.items("BASE_MODEL"))
 
         if base_model_name == 'xlm_r':
@@ -230,8 +228,6 @@ class Pipeline(object):
         Returns: 
             * learner (either MAML or BaselineLearner): learner to be used for meta learning
         """
-
-        logger.info(f"Using learner: {learner_method}")
 
         learner_kwargs = dict(self.config.items("LEARNER"))
         del learner_kwargs['method']

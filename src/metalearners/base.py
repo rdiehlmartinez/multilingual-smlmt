@@ -3,15 +3,11 @@ __author__ = 'Richard Diehl Martinez'
 
 import abc 
 import copy 
-# custom higher
-import higher
 import logging
 import math
 import os
 import re 
 import time
-
-from collections import OrderedDict
 
 import torch
 from torch.optim import AdamW

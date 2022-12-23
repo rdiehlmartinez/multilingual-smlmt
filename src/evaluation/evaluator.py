@@ -147,8 +147,6 @@ class Evaluator(object):
         else:
             override_gpu_device = None
 
-        print("running eval language: ", eval_dataset.language, " on device: ", override_gpu_device)
-
         # Wrapping finetune dataset in a ShuffledIterableDataset (to prevent overfitting 
         # issues when finetuning on a small dataset); ShuffledIterableDataset also enables 
         # us to hold out a validation set from the finetune dataset to monitor finetuning

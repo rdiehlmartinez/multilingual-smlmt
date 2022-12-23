@@ -6,7 +6,10 @@ Implements Model Agnostic Meta Learning: https://arxiv.org/abs/1703.03400
 import time
 import itertools
 import logging
-import higher
+
+# custom higher version
+import lib.higher.higher as higher
+
 import torch
 
 from .base import BaseMetaLearner
@@ -62,6 +65,8 @@ class MAML(BaseMetaLearner):
 
         """              
 
+        self.train()
+
         innerloop_optimizer_param_groups = self.innerloop_optimizer_param_groups()
 
         # Getting lrs for each parameter group
@@ -87,9 +92,7 @@ class MAML(BaseMetaLearner):
         ) as (flearner, diffopt):
             
             # Running the inner loop adaptation to the support set 
-            self.train()
             flearner.train()
-            flearner.zero_grad()
 
             # --- RUNNING ADAPTATION
             for num_step in range(num_adaptation_steps):
@@ -125,6 +128,7 @@ class MAML(BaseMetaLearner):
                 # Inner loop backward pass
                 diffopt.step(loss)
 
+
             # --- FINISHED ADAPTATION        
 
             # Disable dropout
@@ -133,7 +137,7 @@ class MAML(BaseMetaLearner):
                     module.eval()
 
             query_outputs = flearner(
-                    input_ids=query_batch['input_ids'],
+                    input_ids=query_batch['input_ids'], 
                     attention_mask=query_batch['attention_mask'],
             )
             _, query_loss = self._compute_task_loss(
@@ -214,7 +218,6 @@ class MAML(BaseMetaLearner):
             # --- 4) UPDATING THE INNER LOOP LEARNING RATES
 
             for layer_num, inner_layer_lr in self.inner_layers_lr.items():
-                
                 if inner_layer_lr.grad is not None:
                     inner_layer_lr.grad += torch.autograd.grad(
                         outputs=query_loss,
