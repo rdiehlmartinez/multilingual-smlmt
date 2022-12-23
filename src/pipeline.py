@@ -492,7 +492,7 @@ class Pipeline(object):
 
                     wandb.log(
                         {
-                            "train.loss": task_batch_loss,
+                            "train_loss": task_batch_loss,
                             "num_task_batches": self.num_task_batches
                         },
                     )

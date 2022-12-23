@@ -6,16 +6,8 @@ Implements Model Agnostic Meta Learning: https://arxiv.org/abs/1703.03400
 import time
 import itertools
 import logging
-import copy
-
-# custom higher version
-import lib.higher.higher as higher
-
+import higher
 import torch
-
-# from transformers import AdamW
-from torch.optim import AdamW
-from collections import defaultdict
 
 from .base import BaseMetaLearner
 from ..taskheads import TaskHead

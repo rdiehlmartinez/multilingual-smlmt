@@ -12,7 +12,7 @@ from collections import defaultdict
 from ..datasets import NLUDataLoader, NLU_TASK_DATA_GENERATOR_MAPPING
 from ..utils import num_gpus
 from ..utils.data import ShuffledIterableDataset
-from ..utils.evaluation import Metric
+from ..utils.evaluation import AccuracyMetric
 
 from wandb.errors import UsageError
 from multiprocessing import Pool, Manager
@@ -61,7 +61,6 @@ class Evaluator(object):
 
         self.max_epochs = config.getint("EVALUATION", "max_epochs", fallback=5)
  
-
         self.save_checkpoints = config.getboolean("EXPERIMENT", "save_checkpoints", fallback=True)
 
         if self.save_checkpoints:
@@ -73,6 +72,38 @@ class Evaluator(object):
         self.use_wandb = config.getboolean('EXPERIMENT', 'use_wandb', fallback=True)
 
         self.use_multiple_gpus = use_multiple_gpus
+
+        if self.use_wandb: 
+            """ 
+            The evaluation results for each task are stored in tables in wandb; for each task we 
+            store two tables: an overview table that maps training step number to the evaluation 
+            results at that training step and a second that for a given evaluation run, shows the 
+            finetuning process of the model i.e. maps finetuning steps to the evaluation results.
+            """
+            self.eval_tables = {}
+
+            overview_table_columns = [
+                "run_id",
+                "meta_train_step",
+                "eval_language",
+                "eval_loss",
+                "eval_metric",
+                "num_convergence_steps"
+            ]
+
+            finetune_table_columns = [
+                "run_id",
+                "meta_train_step",
+                "finetune_step",
+                "eval_language",
+                "finetune_loss",
+                "dev_loss",
+                "dev_metric"
+            ]
+
+            for task in self.tasks: 
+                self.eval_tables[task + "_overview"] = wandb.Table(columns=overview_table_columns)
+                self.eval_tables[task + "_finetune"] = wandb.Table(columns=finetune_table_columns)
         
     ### Entry point to running evaluation
 
@@ -116,6 +147,8 @@ class Evaluator(object):
         else:
             override_gpu_device = None
 
+        print("running eval language: ", eval_dataset.language, " on device: ", override_gpu_device)
+
         # Wrapping finetune dataset in a ShuffledIterableDataset (to prevent overfitting 
         # issues when finetuning on a small dataset); ShuffledIterableDataset also enables 
         # us to hold out a validation set from the finetune dataset to monitor finetuning
@@ -145,6 +178,25 @@ class Evaluator(object):
         return (eval_dataset.language, eval_metric, eval_loss, finetune_info)
 
 
+    @staticmethod
+    def zip_longest_pad_last(*lists):
+        """ 
+        Zips together lists of different lengths by padding the shorter lists with the last item
+        in the list.
+
+        modified from: https://stackoverflow.com/a/44250949 
+        """
+        def g(l):
+            for item in l:
+                yield item
+            while True:
+                # continues to return the last item in the list
+                yield item
+
+        gens = [g(l) for l in lists]    
+        for _ in range(max(map(len, lists))):
+            yield tuple(next(g) for g in gens)
+
     def log_results(
         self,
         eval_lngs: List[str],
@@ -172,96 +224,105 @@ class Evaluator(object):
 
         eval_metric_mean = sum(eval_metrics)/len(eval_metrics)
         eval_loss_mean = sum(eval_losses)/len(eval_losses)
+        num_convergence_steps_mean = sum(
+            [len(finetune_info) for finetune_info in finetune_infos]
+        )/len(finetune_infos)
 
         logger.info(f"\t (Task {task_idx}) Avg. {metric.name}: {eval_metric_mean:.4f}")
         logger.info(f"\t (Task {task_idx}) Avg. Loss: {eval_loss_mean:.4f}")
 
         if self.use_wandb:
 
-            # Logging out task-wide metrics and loss vs. meta training steps
-            wandb.define_metric(
-                f"{task}.{metric.name}",
-                step_metric="num_task_batches",
-                summary=metric.summary.__name__
-            )
-            wandb.define_metric(
-                f"{task}.loss",
-                step_metric="num_task_batches",
-                summary='min'
+            # 1) logging out the average eval metric and loss over all eval languages at the 
+            # curent num_task_batches training steps
+            self.eval_tables[task + "_overview"].add_data(
+                wandb.run.id,
+                num_task_batches,
+                "average", # averaged over all eval languages
+                eval_loss_mean,
+                eval_metric_mean,
+                num_convergence_steps_mean 
             )
 
-            wandb.log({
-                task: {
-                    "loss": eval_loss_mean,
-                    metric.name: eval_metric_mean,      
-                },
-                "num_task_batches": num_task_batches
-            })
-        
-            # Logging out language-specific metrics
-            
+            # 2) For each individual eval language, logging out the eval metric to the overview 
+            # table + logging out the finetuning info to the finetune table
             for eval_lng, eval_metric, eval_loss, finetune_info in zip(
                 eval_lngs, eval_metrics, eval_losses, finetune_infos
             ):
-                # Defining metrics 
-
-                wandb.define_metric(
-                    f"{task}.{eval_lng}.{metric.name}",
-                    step_metric="num_task_batches",
-                    summary=metric.summary.__name__
+                self.eval_tables[task + "_overview"].add_data(
+                    wandb.run.id,
+                    num_task_batches,
+                    eval_lng, # averaged over all eval languages
+                    eval_loss,
+                    eval_metric,
+                    len(finetune_info) # number of finetune steps (aka. convergence steps)
                 )
-                wandb.define_metric(
-                    f"{task}.{eval_lng}.loss",
-                    step_metric="num_task_batches",
-                    summary='min'
-                )
-
-                # Logging out metrics and loss for a given language vs. meta training steps
-                wandb.log({
-                    task: {
-                        eval_lng: {
-                            "loss": eval_loss,
-                            metric.name: eval_metric,
-                        },
-                    },
-                    "num_task_batches": num_task_batches   
-                })
-
-
-                # Logging out finetuning process metrics and loss vs. finetuning steps for 
-                # a given language 
-                step_metric_name = f"{task}.{eval_lng}.step_{num_task_batches}.finetune_step"
-
-                wandb.define_metric(step_metric_name)
-                    
-                for key in finetune_info[0].keys():
-
-                    if key == "finetune_step":
-                        continue
-
-                    wandb.define_metric( 
-                        f"{task}.{eval_lng}.step_{num_task_batches}.{key}",
-                        step_metric=step_metric_name,
-                    )
-
-                # Logging out finetuning process metrics and loss vs. finetuning steps
-
+                
                 for finetune_step_info in finetune_info:
                     # each finetune_step is a dictionary of metrics
-                    for key, value in finetune_step_info.items():
-                        if key == "finetune_step":
-                            continue
+                    self.eval_tables[task + "_finetune"].add_data(
+                        wandb.run.id,
+                        num_task_batches,
+                        finetune_step_info["step_num"],
+                        eval_lng,
+                        finetune_step_info["finetune_loss"],
+                        finetune_step_info["dev_loss"],
+                        finetune_step_info["dev_metric"],
+                    )
 
-                        wandb.log({
-                            task: {
-                                eval_lng: {
-                                    f"step_{num_task_batches}": {
-                                        "finetune_step": finetune_step_info["step_num"],
-                                        key: value
-                                    }
-                                }  
-                            }
-                        })
+            # 3) Across all languages, logging out the average finetuning info to the finetune
+            # table
+            for all_finetune_step_info in self.zip_longest_pad_last(*finetune_infos):
+                # zipping together the finetune info at each step for all the languages so that 
+                # we can report the average metrics at each step across all languages
+
+                # NOTE: zip_longest_pad_last will pad the shorter lists with the last item in the 
+                # list, as a result the current finetune_step_num is the max step_num across all
+                # languages (because some languages may have converged before others)
+
+                finetune_step_num = max([f_step["step_num"] for f_step in all_finetune_step_info])
+
+                finetune_step_loss_mean = sum(
+                    [f_step["finetune_loss"] for f_step in all_finetune_step_info]
+                )/len(all_finetune_step_info)
+
+                finetune_step_dev_loss_mean = sum(
+                    [f_step["dev_loss"] for f_step in all_finetune_step_info]
+                )/len(all_finetune_step_info)
+
+                finetune_step_dev_metric_mean = sum(
+                    [f_step["dev_metric"] for f_step in all_finetune_step_info]
+                )/len(all_finetune_step_info)
+
+                self.eval_tables[task + "_finetune"].add_data(
+                        wandb.run.id,
+                        num_task_batches,
+                        finetune_step_num,
+                        "average",
+                        finetune_step_loss_mean,
+                        finetune_step_dev_loss_mean,
+                        finetune_step_dev_metric_mean,
+                )
+
+            # Push up tables to wandb
+            wandb_overview_table_name = task + "_overview" + f"_table"
+            wandb_finetune_table_name = task + "_finetune" + f"_table" 
+            wandb.log({
+                wandb_overview_table_name: self.eval_tables[task + "_overview"], 
+                wandb_finetune_table_name: self.eval_tables[task + "_finetune"]
+            })
+
+            # Reinitialization required due to ongoing bug, see:
+            # https://github.com/wandb/wandb/issues/2981 
+
+            self.eval_tables[task + "_overview"] = wandb.Table(
+                columns=self.eval_tables[task + "_overview"].columns,
+                data=self.eval_tables[task + "_overview"].data
+            )
+            self.eval_tables[task + "_finetune"] = wandb.Table(
+                columns=self.eval_tables[task + "_finetune"].columns,
+                data=self.eval_tables[task + "_finetune"].data
+            )
 
 
     def run(self, learner: BaseLearner, num_task_batches: int = 0) -> bool:
@@ -347,7 +408,7 @@ class Evaluator(object):
             else: 
                 # If using a single GPU, we can just run the tasks sequentially
 
-                eval_lngs, eval_metrics, eval_losses, finetune_infos = [], []
+                eval_lngs, eval_metrics, eval_losses, finetune_infos = [], [], [], []
 
                 for finetune_dataset, eval_dataset in task_data_generator:
                     eval_lng, eval_metric, eval_loss, finetune_info = self._run_single_task(

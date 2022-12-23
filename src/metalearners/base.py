@@ -2,8 +2,9 @@ __author__ = 'Richard Diehl Martinez'
 """ Interface class for (meta) learners """
 
 import abc 
+import copy 
 # custom higher
-import lib.higher.higher as higher
+import higher
 import logging
 import math
 import os
@@ -13,7 +14,9 @@ import time
 from collections import OrderedDict
 
 import torch
+from torch.optim import AdamW
 
+from ..utils import move_to_device
 from ..datasets import NLUDataLoader
 from ..taskheads import TaskHead, ClassificationHead
 
@@ -324,7 +327,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 we break out of the loop if the validation loss stops improving
             * batch_size: An integer indicating the batch size to use for the finetuning
             * device: Optional string to specify a device to override base_device
-            * return_finetune_info: A boolean indicating whether to return the training losses
+            * return_finetune_info: A boolean indicating whether to return the losses
                 and accuracies for the finetuning process
 
         Returns (if return_finetune_info is False):
@@ -333,16 +336,16 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         Returns (if return_finetune_info is True):
             * eval_metric: The evaluation metric for the given 
             * total_eval_loss: A float indicating the loss of the model on the evaluation set
-            * finetuning_info: A dictionary containing the following information:
-                * train_losses: A list of training losses for every evaluation step
-                * train_accuracies: A list of training accuracies for every evaluation step
-                * val_losses: A list of validation losses for every evaluation step
-                * val_accuracies: A list of validation accuracies for every evaluation step
+            * finetune_info: A list of dictionaries containing the following information:
+                * finetune_loss: The loss of the model on the finetuning set
+                * dev_loss: The loss of the model on the development set
+                * dev_metric: The metric of the model on the development set
+                * step_num: The number of steps the model has been finetuned for 
         """
         
         assert 'protomaml' not in task_head_init_method,\
             "Protomaml task head initialization is not supported for evaluation"
-        
+
         if device is None:
             device = self.base_device
 
@@ -445,7 +448,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                             metric.summary(dev_metric, best_dev_metric) == dev_metric:
 
                             best_dev_metric = dev_metric
-                            patience = MAX_PATIENCE
+                            patience = MAX_PATIENCE 
                         else:
                             patience -= 1
                             if patience == 0:
@@ -455,7 +458,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
                         if return_finetune_info:
                             finetune_info.append({
-                                'train_loss': loss.item(),
+                                'finetune_loss': loss.item(),
                                 'dev_loss': dev_loss.item(),
                                 'dev_metric': dev_metric,
                                 'step_num': total_step_num
@@ -468,7 +471,6 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 finetune_optimizer.step()
 
                 total_step_num += 1
-
 
         # Running full evaluation
         finetune_model.eval()
