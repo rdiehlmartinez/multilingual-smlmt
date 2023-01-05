@@ -223,7 +223,7 @@ class Evaluator(object):
         eval_metric_mean = sum(eval_metrics)/len(eval_metrics)
         eval_loss_mean = sum(eval_losses)/len(eval_losses)
         num_convergence_steps_mean = sum(
-            [len(finetune_info) for finetune_info in finetune_infos]
+            [finetune_info[-1]['step_num'] for finetune_info in finetune_infos]
         )/len(finetune_infos)
 
         logger.info(f"\t (Task {task_idx}) Avg. {metric.name}: {eval_metric_mean:.4f}")
@@ -253,7 +253,7 @@ class Evaluator(object):
                     eval_lng, 
                     eval_loss,
                     eval_metric,
-                    len(finetune_info) # number of finetune steps (aka. convergence steps)
+                    finetune_info[-1]['step_num'] # no. of finetuning steps to convergence
                 )
                 
                 for finetune_step_info in finetune_info:
