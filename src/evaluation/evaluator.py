@@ -250,7 +250,7 @@ class Evaluator(object):
                 self.eval_tables[task + "_overview"].add_data(
                     wandb.run.id,
                     num_task_batches,
-                    eval_lng, # averaged over all eval languages
+                    eval_lng, 
                     eval_loss,
                     eval_metric,
                     len(finetune_info) # number of finetune steps (aka. convergence steps)
@@ -305,23 +305,23 @@ class Evaluator(object):
             # Push up tables to wandb
             wandb_overview_table_name = task + "_overview" + f"_table"
             wandb_finetune_table_name = task + "_finetune" + f"_table" 
-            wandb.log({
-                wandb_overview_table_name: self.eval_tables[task + "_overview"], 
-                wandb_finetune_table_name: self.eval_tables[task + "_finetune"]
-            })
 
             # Reinitialization required due to ongoing bug, see:
             # https://github.com/wandb/wandb/issues/2981 
 
-            self.eval_tables[task + "_overview"] = wandb.Table(
+            curr_wandb_overview_table = wandb.Table(
                 columns=self.eval_tables[task + "_overview"].columns,
                 data=self.eval_tables[task + "_overview"].data
             )
-            self.eval_tables[task + "_finetune"] = wandb.Table(
+            curr_wandb_finetune_table = wandb.Table(
                 columns=self.eval_tables[task + "_finetune"].columns,
                 data=self.eval_tables[task + "_finetune"].data
             )
 
+            wandb.log({
+                wandb_overview_table_name: curr_wandb_overview_table, 
+                wandb_finetune_table_name: curr_wandb_finetune_table
+            })
 
     def run(self, learner: BaseLearner, num_task_batches: int = 0) -> bool:
         """ 
