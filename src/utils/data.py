@@ -179,7 +179,10 @@ class ShuffledIterableDataset(torch.utils.data.IterableDataset):
 
         for idx in range(self.buffer_size):
             
-            curr_sample = next(dataset_iter)
+            try: 
+                curr_sample = next(dataset_iter)
+            except StopIteration:
+                raise ValueError("Cannot create dev batch: buffer size < dataset size")
 
             if idx in hold_out_idxs:
                 dev_batch.append(curr_sample)
@@ -212,7 +215,12 @@ class ShuffledIterableDataset(torch.utils.data.IterableDataset):
             # NOTE: we hold out a single batch for dev set, so we need to add a different 
             # batch to the buffer
             for _ in range(self.batch_size):
-                shufbuf.append(next(dataset_iter))
+                try: 
+                    shufbuf.append(next(dataset_iter))
+                except StopIteration:
+                    # shufbuf is smaller than buffer size; in the lines below we will just return
+                    # the remaining samples in shufbuf (will exit early from the while True loop)
+                    break
 
         try:
             while True:
