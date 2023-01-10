@@ -376,7 +376,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         if train_to_convergence:
             # only applicable for full model tuning
             MAX_PATIENCE = 3  # NOTE: un-tuned hyperparameter
-            EVAL_EVERY_N_STEPS = 1  # NOTE: un-tuned hyperparameter
+            EVAL_EVERY_N_STEPS = 20  # NOTE: un-tuned hyperparameter
 
             patience = MAX_PATIENCE
             best_dev_metric = None
