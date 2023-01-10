@@ -629,8 +629,6 @@ class MetaDataset(IterableDataset):
         Initialize MetaDataset using a config file. MetaDataset is the method used for
         pre-training the meta-learning model.
         """
-        logger.info(f"Initializing MetaDataset")
-
         languages = self._get_languages(config)
         self.datasets, self.datasets_md = self._initialize_datasets(config, languages)
 

@@ -91,8 +91,6 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                     "LM head will be reinitialized without protomaml (NOT RECOMMENDED)"
                 )
 
-        logger.info(f"LM head retaining set to: {self.retain_lm_head}")
-
         # set flag to indicate whether we want to use the same or different N-way K-shot tasks
         # during each training loop
         if isinstance(use_multiple_samples, str):

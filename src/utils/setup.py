@@ -16,13 +16,11 @@ from configparser import ConfigParser
 def set_seed(seed: int) -> None:
     """Sets seed for reproducibility"""
     if seed < 0:
-        logging.info("Skipping seed setting for reproducibility")
-        logging.info(
+        logging.warning("Skipping seed setting for reproducibility")
+        logging.warning(
             "If you would like to set a seed, set seed to a positive value in config"
         )
         return
-
-    logging.info(f"Setting seed: {seed}")
 
     random.seed(seed)
     np.random.seed(seed)
@@ -89,15 +87,16 @@ def setup(
 
     # we are resuming training if resume_num_task_batches is greater than 0
     resume_training = resume_num_task_batches > 0
-    if resume_training:
-        logging.info(f"Resuming run with id: {run_id}")
-    else:
-        logging.info(f"Starting run with id: {run_id}")
 
     setup_logger(config_file_path)
     setup_wandb(config, run_id, resume_training)
 
     seed = config.getint("EXPERIMENT", "seed", fallback=-1)
+
+    if resume_training:
+        logging.info(f"Resuming run with id: {run_id}")
+    else:
+        logging.info(f"Initializing run with id: {run_id}")
 
     # shifting over the random seed by resume_num_task_batches steps in order for the meta
     # dataset to not yield the same sentences as already seen by the model

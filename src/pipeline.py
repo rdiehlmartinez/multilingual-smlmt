@@ -70,10 +70,6 @@ class Pipeline(object):
         self.use_multiple_gpus = (
             self.base_device == torch.device("cuda") and num_gpus > 1
         )
-        logger.info(f"Running pipeline on device: {self.base_device}")
-        if self.base_device == torch.device("cuda"):
-            logger.info(f"Number of GPUs available: {num_gpus}")
-
         # setting num_task_batches before learner, to inform learner if we are resuming training
         # or starting fresh
         self.num_task_batches = (
@@ -143,32 +139,18 @@ class Pipeline(object):
         """
         Helper functionality for logging out parameters and hyperparameters of the pipeline
         """
+        logger.debug("")
         logger.debug("*" * 40)
-        logger.debug("Pipeline Parameters")
-        logger.debug(f"\t General parameters: ")
-        logger.debug(f"\t\t * Use Wandb: {self.use_wandb}")
-        logger.debug(f"\t\t * Save Checkpoints: {self.save_checkpoints}")
-        logger.debug(f"\t\t * Use Multiple GPUs: {self.use_multiple_gpus}")
-        logger.debug(f"\t\t * Base Device: {self.base_device}")
-
-        if self.mode == "train":
-            logger.debug(f"\t Training parameters: ")
-            logger.debug(f"\t\t * Meta Learning Rate: {self.meta_lr}")
-            logger.debug(
-                f"\t\t * Meta Learning Rate Scheduler: {self.meta_lr_scheduler_method}"
-            )
-            logger.debug(f"\t\t * Max Task Batch Steps: {self.max_task_batch_steps}")
-            logger.debug(
-                f"\t\t * Num Tasks Per Iteration: {self.num_tasks_per_iteration}"
-            )
-            logger.debug(
-                f"\t\t * Eval Every N Iterations: {self.eval_every_n_iteration}"
-            )
-
-        logger.debug(f"\t Modeling parameters: ")
-        logger.debug(f"\t\t * Learner Method: {self.learner_method}")
-        logger.debug(f"\t\t * Base Model: {self.base_model_name}")
+        logger.debug("PIPELINE PARAMETERS")
+        logger.debug("")
+        for section in self.config:
+            if section == "DEFAULT":
+                continue
+            logger.debug(f"\t {section} PARAMETERS: ")
+            for key, value in self.config[section].items():
+                logger.debug(f"\t\t * {key}: {value}")
         logger.debug("*" * 40)
+        logger.debug("")
 
     def load_checkpoint(self):
         """
@@ -266,8 +248,6 @@ class Pipeline(object):
 
         if self.checkpoint is not None:
             learner.load_state_dict(self.checkpoint["learner_state_dict"], strict=False)
-        else:
-            logger.info("No checkpoint used - learning from scratch")
 
         return learner
 
@@ -417,7 +397,7 @@ class Pipeline(object):
         ### --------- Inference Mode (no model training) ----------
 
         if self.mode == "inference":
-            logger.info("Running pipeline in inference-only mode")
+            logger.info("### RUNNING PIPELINE IN INFERENCE MODE ###")
 
             if not hasattr(self, "evaluator"):
                 logger.error(
@@ -426,12 +406,13 @@ class Pipeline(object):
                 return
 
             self.evaluator.run(self.learner)
-            logger.info("Finished running inference-only model")
+
+            logger.info("### PIPELINE FINISHED ###")
             return
 
         ### -------------------- Training Mode --------------------
 
-        logger.info("Running pipeline in training mode")
+        logger.info("### RUNNING PIPELINE IN TRAINING MODE ###")
 
         ### Setting up tracking variables and w&b metrics
 
@@ -461,7 +442,6 @@ class Pipeline(object):
         ):
             # num_task_batches would only ever not be 0 if we're resuming training because of
             # previous timeout failure, in that case don't run initial eval
-            logger.info("Initial evaluation before model training")
             if not hasattr(self, "evaluator"):
                 logger.warning("Evaluation missing in config - skipping evaluator run")
             else:
@@ -469,7 +449,6 @@ class Pipeline(object):
 
         ### Model training loop
 
-        logger.info("Starting model training")
         for task_batch_idx, task_batch in enumerate(self.meta_dataloader):
             logger.debug(f"\t (Task idx {task_batch_idx}) Language: {task_batch[0]}")
 
@@ -544,7 +523,7 @@ class Pipeline(object):
 
         ### Model done training - final clean up before exiting
 
-        logger.info("Finished training model")
+        logger.info("### PIPELINE FINISHED ###")
         if self.save_checkpoints:
             self.save_checkpoint("final.pt")
 
