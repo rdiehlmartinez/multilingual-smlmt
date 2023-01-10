@@ -1,4 +1,4 @@
-__author__ = 'Richard Diehl Martinez'
+__author__ = "Richard Diehl Martinez"
 """
 Helper classes for the evaluator; define interface for different types of evaluation metrics i.e. 
 accuracy, F1, etc.
@@ -9,8 +9,8 @@ import numpy as np
 
 from typing import Callable, List
 
-class Metric(object, metaclass=abc.ABCMeta):
 
+class Metric(object, metaclass=abc.ABCMeta):
     @property
     @abc.abstractmethod
     def name(self) -> str:
@@ -26,21 +26,21 @@ class Metric(object, metaclass=abc.ABCMeta):
     @staticmethod
     @abc.abstractmethod
     def __call__(self, predictions: List[int], labels: List[int]) -> float:
-        """ 
+        """
         Computes the metric given the predictions and labels
 
-        Args: 
+        Args:
             predictions: List of predictions
             labels: List of labels
 
-        Returns: 
+        Returns:
             metric: The metric value
-            
+
         """
         raise NotImplementedError
 
-class AccuracyMetric(Metric): 
 
+class AccuracyMetric(Metric):
     @property
     def name(self):
         return "accuracy"
@@ -50,12 +50,9 @@ class AccuracyMetric(Metric):
         return max
 
     @staticmethod
-    def __call__(
-        predictions: List[int],
-        labels: List[int]
-    ) -> float:
-        """ 
+    def __call__(predictions: List[int], labels: List[int]) -> float:
+        """
         Computes accuracy of predictions for the data of the eval_dataloader
-        """        
-        accuracy = (np.array(predictions) == np.array(labels)).sum()/len(labels)
+        """
+        accuracy = (np.array(predictions) == np.array(labels)).sum() / len(labels)
         return accuracy
