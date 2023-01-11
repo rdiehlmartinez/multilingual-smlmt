@@ -629,6 +629,7 @@ class MetaDataset(IterableDataset):
         Initialize MetaDataset using a config file. MetaDataset is the method used for
         pre-training the meta-learning model.
         """
+
         languages = self._get_languages(config)
         self.datasets, self.datasets_md = self._initialize_datasets(config, languages)
 
@@ -702,10 +703,17 @@ class MetaDataset(IterableDataset):
 
             language_task_kwargs = dict(config.items("LANGUAGE_TASK"))
 
-            if "num_task_samples" in language_task_kwargs:
-                assert (
-                    config.getboolean("LEARNER", "use_multiple_samples") is True
-                ), "num_task_samples should only be specified if use_multiple_samples is True"
+            # check if when learner has use_multiple_samples to true num_inner_loop_steps
+            # is equal to num_task_samples
+            if (
+                config.getboolean("LEARNER", "use_multiple_samples", fallback=True)
+                is True
+            ):
+                assert config.getint(
+                    "LANGUAGE_TASK", "num_task_samples"
+                ) == config.getint(
+                    "LEARNER", "num_innerloop_steps"
+                ), "num_task_samples should be equal to num_innerloop_steps"
 
             dataset = IterableLanguageTaskDataset(
                 lng_root_fp, language, seed=seed, **language_task_kwargs
