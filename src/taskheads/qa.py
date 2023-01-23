@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from .base import TaskHead
@@ -6,15 +7,13 @@ from .base import TaskHead
 # typing imports
 from typing import Tuple, Dict
 
-logger = logging.getLogger(__name__)
-
 
 class QAHead(TaskHead):
     """Task head for question answering tasks"""
 
     def __call__(
         self,
-        model_output: torch.Tensor,
+        model_outputs: torch.Tensor,
         labels: Dict[str, torch.Tensor],
         weights: nn.ParameterDict,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -23,23 +22,23 @@ class QAHead(TaskHead):
         Architecture inspired by the huggingface implementation of RobertaForQuestionAnswering head.
 
         Args:
-            * model_output: output of the base model
+            * model_outputs: output of the base model
             * labels: a dictionary containing the start and end labels for the question answering
                 task, must contain keys "start_positions" and "end_positions"
             * weights: weights for qa projection, must contain keys "classifier_weight" and
                 "classifier_bias"
         Returns:
-            * logits: logits for the qa task (is a tuple of start and end logits)
+            * logits: logits for the qa task (encapsulates both the start and end logits)
             * loss: loss for the qa task
         """
 
-        logits = F.linear(model_output, **classifier_weights)
+        logits = F.linear(model_outputs, **classifier_weights)
 
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits, end_logits = start_logits.squeeze(-1), end_logits.squeeze(-1)
 
         # NOTE: as the ignore index we pass in the max size of
-        loss_function = torch.nn.CrossEntropyLoss(ignore_index=start_logits.size(1))
+        loss_function = nn.CrossEntropyLoss(ignore_index=start_logits.size(1))
 
         start_loss = loss_function(start_logits, start_positions)
         end_loss = loss_function(end_logits, end_positions)
@@ -67,10 +66,10 @@ def qa_random(
             }
     """
 
-    weight = torch.nn.Parameter(
-        torch.randn(base_model_hidden_dim, 2), requires_grad=True
-    ).to(device)
-    bias = torch.nn.Parameter(torch.randn(2), requires_grad=True).to(device)
+    weight = nn.Parameter(torch.randn(base_model_hidden_dim, 2), requires_grad=True).to(
+        device
+    )
+    bias = nn.Parameter(torch.randn(2), requires_grad=True).to(device)
 
     task_head_weights = {
         "weight": classifier_weight,
