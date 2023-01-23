@@ -66,7 +66,7 @@ class BaselineLearner(BaseLearner):
         if device is None:
             device = self.base_device
 
-        # retain LM head is required for baseline
+        # NOTE: retain LM head is required for baseline
 
         self.train()
 

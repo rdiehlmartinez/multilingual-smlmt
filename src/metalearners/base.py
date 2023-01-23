@@ -4,24 +4,22 @@ __author__ = "Richard Diehl Martinez"
 import abc
 import copy
 import logging
-import math
 import os
 import re
-import time
 
 import torch
 from torch.optim import AdamW
 
+from torch.utils.data import DataLoader, RandomSampler
+
 from ..utils import move_to_device
-from ..datasets import NLUDataLoader
-from ..taskheads import TaskHead, ClassificationHead
+from ..taskheads import TaskHead, ClassificationHead, QAHead
 
 # imports for typing
-from ..datasets import NLUDataset
+from torch.utils.data import Dataset
+from ..datasets import NLUTaskGenerator
 from ..models import BaseModel
 from typing import Tuple, List, Dict, Union, Any, Iterator
-from ..utils.data import ShuffledIterableDataset
-from ..utils.evaluation import Metric
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +31,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         base_device: torch.device,
         seed: int,
         lm_head_init_method: str = "protomaml",
-        lm_head_n: Union[int, str] = 100,
+        lm_head_n: Union[int, str] = 10,
         retain_lm_head: Union[bool, str] = False,
         use_multiple_samples: Union[bool, str] = True,
     ) -> None:
@@ -76,13 +74,8 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             assert (
                 "random" in self.lm_head_init_method
             ), "retain_task_head can only be set to True if lm_head_init_method is 'random'"
-            init_kwargs = self.get_task_init_kwargs(
-                "classification",
-                self.lm_head_init_method,
-                self.lm_head_n,
-            )
+            init_kwargs = self.get_lm_head_init_kwargs()
             self.retained_lm_head_weights = TaskHead.initialize_task_head(**init_kwargs)
-
         else:
             # If we are re-initializing the LM head for each training task, then we should use
             # protomaml
@@ -98,24 +91,21 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         else:
             self.use_multiple_samples = use_multiple_samples
 
-    ###### Task head initialization methods ######
+    ###### Head initialization methods ######
 
-    def get_task_init_kwargs(
+    def get_eval_task_head_init_kwargs(
         self,
-        task_type: str,
-        task_init_method: str,
-        n_labels: int,
+        task_generator: NLUTaskGenerator,
         data_batch: Dict[str, torch.Tensor] = None,
         device: torch.device = None,
     ) -> Dict[str, Any]:
         """
         Helper method for generating keyword arguments that can be passed into a task head
-        initialization method
+        initialization method to generate a task head for evaluation.
+        NOTE: Should really only be called during evaluation
 
         Args:
-            * task_type: Type of task head to initialize (e.g. 'classification')
-            * task_init_method: Method for initializing the task head
-            * n_labels: Number of labels defined by the task (i.e. classes)
+            * task_generator: Task generator used to generate the evaluation tasks
             * data_batch: Batch of data used to initialize the task head if using
                 the protomaml task_init_method
             * device: Device type used to initialize the task head with, if not
@@ -127,14 +117,62 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         init_kwargs = {}
 
-        init_kwargs["task_type"] = task_type
-        init_kwargs["task_init_method"] = task_init_method
-        init_kwargs["n_labels"] = n_labels
+        init_kwargs["task_type"] = task_generator.task_type
+        init_kwargs["task_init_method"] = task_generator.task_head_init_method
+
+        if task_generator.task_type == "classification":
+            init_kwargs["n_labels"] = task_generator.num_classes
 
         init_kwargs["base_model_hidden_dim"] = self.base_model_hidden_dim
         init_kwargs["device"] = device if device is not None else self.base_device
 
-        if "protomaml" in task_init_method:
+        if "protomaml" in task_generator.task_head_init_method:
+            assert (
+                data_batch is not None
+            ), "Use of protomaml as a classification head initializer requires a data_batch"
+            init_kwargs["model"] = self.base_model
+            init_kwargs["data_batch"] = data_batch
+
+        return init_kwargs
+
+    def get_lm_head_init_kwargs(
+        self,
+        lm_head_init_method: str = None,
+        data_batch: Dict[str, torch.Tensor] = None,
+        device: torch.device = None,
+    ) -> Dict[str, Any]:
+        """
+        Helper method for generating keyword arguments that can be passed into a task head
+        initialization method to generate a language modeling task head.
+        NOTE: Should really only be called during training
+
+        Args:
+            * lm_head_init_method: Method for initializing the lm head head
+            * data_batch: Batch of data used to initialize the lm head head if using
+                the protomaml task_init_method
+            * device: Device type used to initialize the task head with, if not
+                specified defaults to self.base_device
+
+        Returns:
+            * init_kwargs (dict): Keyword arguments used by the task head initialization function
+        """
+
+        init_kwargs = {}
+
+        lm_head_init_method = (
+            lm_head_init_method
+            if lm_head_init_method is not None
+            else self.lm_head_init_method
+        )
+
+        init_kwargs["task_type"] = "classification"
+        init_kwargs["task_init_method"] = lm_head_init_method
+        init_kwargs["n_labels"] = self.lm_head_n
+
+        init_kwargs["base_model_hidden_dim"] = self.base_model_hidden_dim
+        init_kwargs["device"] = device if device is not None else self.base_device
+
+        if "protomaml" in lm_head_init_method:
             assert (
                 data_batch is not None
             ), "Use of protomaml as a classification head initializer requires a data_batch"
@@ -151,7 +189,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         data_batch: Dict[str, torch.Tensor],
         task_head_weights: torch.nn.ParameterDict,
         task_type: str,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Union[torch.Tensor, List[torch.Tensor]], torch.Tensor]:
         """
         Helper function for computing the task loss on a given batch of data. We assume that the
         data has already been passed through the base_model - the result of which is model_outputs
@@ -165,25 +203,21 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             * task_head_weights: Weights used by the task head (in this the classifier head)
             * task_type (str): Type of task (e.g. 'classification')
         Returns:
-            * logits: logits for the classification task
+            * logits: logits for the classification task - can either be a list of tensors
+                or a single tensor depending on the task type and the corresponding task head
             * loss: loss for the classification task
         """
 
-        # indexing into sequence layer of model_outputs -> (batch_size, hidden_size)
-        batch_size = model_outputs.size(0)
-
-        last_hidden_state = model_outputs[
-            torch.arange(batch_size), data_batch["input_target_idx"]
-        ]
-
         if task_type == "classification":
             head = ClassificationHead()
+        elif task_type == "qa":
+            head = QAHead()
         else:
             logger.exception(f"Invalid task type: {task_type}")
             raise Exception(f"Invalid task type: {task_type}")
 
         logits, loss = head(
-            model_output=last_hidden_state,
+            model_outputs=model_outputs,
             labels=data_batch["label_ids"],
             weights=task_head_weights,
         )
@@ -290,43 +324,18 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def run_evaluation(
         self,
-        finetune_dataset: Union[ShuffledIterableDataset, NLUDataset],
-        eval_dataset: NLUDataset,
-        eval_type: str,
-        metric: Metric,
-        task_type: str,
-        task_head_init_method: str,
-        num_classes: int,
-        batch_size: int,
-        max_epochs: int,
-        lr: float,
+        task_generator: NLUTaskGenerator,
+        task_data: Dict[str, Dict[str, Union[str, Dataset]]],
         device: torch.device = None,
-        return_finetune_info: bool = True,
     ) -> Union[Tuple[float, float], Tuple[float, float, Dict[str, List[float]]]]:
         """
         Runs finetuning of the model on the support set data stored in the finetune_dataset and
         evaluates the model on the evaluation set data stored in the eval_dataset.
 
         Args:
-            * finetune_dataset: An NLU Dataset containing the data for finetuning the
-                pre-trained model on a given NLU task
-            * eval_dataset: An NLU Dataset containing the evaluation set data for the given NLU
-                task
-            * eval_type: A string indicating the type of evaluation (standard, few_shot or
-                cross_lingual)
-            * metric: A callable metric instance that uses the finetuned model to compute the
-                target evaluation metric on the eval_dataloader
-            * task_type: A string indicating the type of task (e.g. 'classification', 'qa', etc.)
-            * task_head_init_method: A string indicating the method used to initialize the task
-                head weights
-            * num_classes: An integer indicating the number of classes in the task
-            * batch_size: An integer indicating the batch size to use for the finetuning
-            * max_epochs: An integer indicating the max number of epochs to run the finetuning;
-                we break out of the loop if the validation loss stops improving
-            * lr: A float indicating the initial learning rate to use for finetuning
+            * task_generator: A task generator object that is used to generate the tasks
+            * task_data: A dictionary containing the data for the tasks
             * device: Optional string to specify a device to override base_device
-            * return_finetune_info: A boolean indicating whether to return the losses
-                and accuracies for the finetuning process
 
         Returns:
             * eval_metric: A float indicating the evaluation metric on the eval_dataloader
@@ -341,24 +350,36 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         self.base_model.to(device)
 
+        # Get the finetune and eval datasets
+        finetune_dataset = task_data["finetune"]["dataset"]
+        eval_dataset = task_data["eval"]["dataset"]
+
         # Setting up the task head for the task
         with torch.no_grad():
-            if task_head_init_method == "protomaml":
+
+            if task_generator.task_head_init_method == "protomaml":
+                assert (
+                    task_generator.task_type == "classification"
+                ), "Protomaml only supports classification tasks"
+
                 # If we are using protomaml, we use the first batch of the finetune dataset
                 # to initialize the task head
-                finetune_dataloader = NLUDataLoader(
-                    finetune_dataset, batch_size=batch_size
+                finetune_sampler = RandomSampler(finetune_dataset)
+                finetune_dataloader = DataLoader(
+                    finetune_dataset,
+                    sampler=finetune_sampler,
+                    batch_size=task_generator.batch_size,
                 )
+
                 init_data_batch = move_to_device(
-                    next(iter(finetune_dataloader)), device
+                    task_generator.process_batch(next(iter(finetune_dataloader))),
+                    device,
                 )
             else:
                 init_data_batch = None
 
-            init_kwargs = self.get_task_init_kwargs(
-                task_type,
-                task_head_init_method,
-                num_classes,
+            init_kwargs = self.get_eval_task_head_init_kwargs(
+                task_generator,
                 data_batch=init_data_batch,
                 device=device,
             )
@@ -369,18 +390,17 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         # NOTE: we only train to convergence when we are training on the full dataset;
         # otherwise, we train for a fixed number of batches (i.e. epochs)
-        train_to_convergence = eval_type != "few_shot"
+        train_to_convergence = task_generator.eval_type != "few_shot"
 
         if train_to_convergence:
-            # only applicable for full model tuning
-            MAX_PATIENCE = 3  # NOTE: un-tuned hyperparameter
-            EVAL_EVERY_N_STEPS = 20  # NOTE: un-tuned hyperparameter
+            assert (
+                "dev" in task_data
+            ), "Must provide a dev dataset when training to convergence"
 
-            patience = MAX_PATIENCE
+            dev_dataset = task_data["dev"]["dataset"]
+
+            patience = task_generator.max_patience
             best_dev_metric = None
-
-        if train_to_convergence:
-            dev_batch = move_to_device(finetune_dataset.dev_batch, device)
 
         # Setting up the optimizer
         finetune_optimizer_param_groups = self.finetune_optimizer_param_groups(
@@ -389,28 +409,37 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             add_decay_information=True,
             weight_decay_val=0.0,  # NOTE: un-tuned hyperparameter
         )
-        finetune_optimizer = AdamW(finetune_optimizer_param_groups, lr=lr)
+        finetune_optimizer = AdamW(
+            finetune_optimizer_param_groups, lr=task_generator.lr
+        )
         finetune_model.train()
 
         total_step_num = 0
         early_exit_training = False
 
+        return_finetune_info = task_generator.eval_type == "standard"
         if return_finetune_info:
             # Setting up the training info dictionary
             finetune_info = []
 
-        for epoch in range(max_epochs):
+        for epoch in range(task_generator.max_epochs):
 
             if early_exit_training:
                 break
 
-            finetune_dataloader = NLUDataLoader(finetune_dataset, batch_size=batch_size)
+            finetune_sampler = RandomSampler(finetune_dataset)
+            finetune_dataloader = DataLoader(
+                finetune_dataset,
+                sampler=finetune_sampler,
+                batch_size=task_generator.batch_size,
+            )
 
             # Finetune the model on the data in the finetune dataloader
             for finetune_batch in finetune_dataloader:
 
                 finetune_optimizer.zero_grad()
 
+                finetune_batch = task_generator.process_batch(finetune_batch)
                 finetune_batch = move_to_device(finetune_batch, device)
 
                 outputs = finetune_model(
@@ -419,51 +448,99 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 )
 
                 _, loss = self._compute_task_loss(
-                    outputs, finetune_batch, task_head_weights, task_type=task_type
+                    outputs,
+                    finetune_batch,
+                    task_head_weights,
+                    task_type=task_generator.task_type,
                 )
 
-                if train_to_convergence and total_step_num % EVAL_EVERY_N_STEPS == 0:
+                ## Average out over the batch for the dev loss
+
+                if (
+                    train_to_convergence
+                    and total_step_num % task_generator.eval_every_n_steps == 0
+                ):
                     # Evaluating the model on the dev set to possbily break out early
+
+                    finetune_model.eval()
+
+                    all_dev_logits = []
+                    all_dev_labels = []
+
+                    total_dev_loss = 0.0
+                    total_dev_samples = 0
+
                     with torch.no_grad():
-                        finetune_model.eval()
 
-                        outputs = finetune_model(
-                            input_ids=dev_batch["input_ids"],
-                            attention_mask=dev_batch["attention_mask"],
+                        dev_dataloader = DataLoader(
+                            dev_dataset, batch_size=task_generator.batch_size
                         )
 
-                        dev_logits, dev_loss = self._compute_task_loss(
-                            outputs, dev_batch, task_head_weights, task_type=task_type
+                        for dev_batch in dev_dataloader:
+                            dev_batch = task_generator.process_batch(dev_batch)
+                            dev_batch = move_to_device(dev_batch, device)
+
+                            dev_outputs = finetune_model(
+                                input_ids=dev_batch["input_ids"],
+                                attention_mask=dev_batch["attention_mask"],
+                            )
+
+                            dev_logits, dev_loss = self._compute_task_loss(
+                                dev_outputs,
+                                dev_batch,
+                                task_head_weights,
+                                task_type=task_generator.task_type,
+                            )
+                            dev_labels = dev_batch["label_ids"]
+
+                            all_dev_logits.append(dev_logits)
+                            all_dev_labels.append(dev_labels)
+
+                            batch_size = dev_logits.size(0)
+                            total_dev_loss += (
+                                dev_loss.detach().item() * batch_size
+                            )  # loss avg across batch
+                            total_dev_samples += batch_size
+
+                        total_dev_loss /= total_dev_samples
+
+                        all_dev_logits = torch.cat(all_dev_logits, dim=0)
+                        all_dev_labels = torch.cat(all_dev_labels, dim=0)
+
+                        # logits and labels are used by the task to compute a task-specific metric
+                        dev_metric = task_generator.compute_metric(
+                            all_dev_logits, all_dev_labels
                         )
-
-                        dev_predictions = torch.argmax(dev_logits, dim=-1).tolist()
-                        dev_labels = dev_batch["label_ids"].tolist()
-
-                        dev_metric = metric(dev_predictions, dev_labels)
-
-                        if (
-                            best_dev_metric is None
-                            or metric.summary(dev_metric, best_dev_metric) == dev_metric
-                        ):
-
-                            best_dev_metric = dev_metric
-                            patience = MAX_PATIENCE
-                        else:
-                            patience -= 1
-                            if patience == 0:
-                                early_exit_training = True
-
-                        finetune_model.train()
 
                         if return_finetune_info:
                             finetune_info.append(
                                 {
                                     "finetune_loss": loss.item(),
-                                    "dev_loss": dev_loss.item(),
+                                    "dev_loss": total_dev_loss,
                                     "dev_metric": dev_metric,
                                     "step_num": total_step_num,
                                 }
                             )
+
+                        finetune_model.train()
+
+                        if (
+                            best_dev_metric is None
+                            or task_generator.metric_is_better(
+                                dev_metric, best_dev_metric
+                            )
+                            == dev_metric
+                        ):
+
+                            best_dev_metric = dev_metric
+                            patience = task_generator.max_patience
+                        else:
+                            patience -= 1
+                            if patience == 0:
+                                early_exit_training = True
+
+                        # TODO REMOVE ME
+                        early_exit_training = True
 
                 if early_exit_training:
                     break
@@ -476,17 +553,18 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         # Running full evaluation
         finetune_model.eval()
 
-        eval_labels = []
-        eval_predictions = []
+        all_eval_logits = []
+        all_eval_labels = []
 
         total_eval_loss = 0.0
         total_eval_samples = 0
 
-        eval_dataloader = NLUDataLoader(eval_dataset, batch_size=batch_size)
+        eval_dataloader = DataLoader(eval_dataset, batch_size=task_generator.batch_size)
 
         with torch.no_grad():
 
             for eval_batch in eval_dataloader:
+                eval_batch = task_generator.process_batch(eval_batch)
                 eval_batch = move_to_device(eval_batch, device)
 
                 eval_outputs = finetune_model(
@@ -495,11 +573,15 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
                 )
 
                 eval_logits, eval_loss = self._compute_task_loss(
-                    eval_outputs, eval_batch, task_head_weights, task_type=task_type
+                    eval_outputs,
+                    eval_batch,
+                    task_head_weights,
+                    task_type=task_generator.task_type,
                 )
+                eval_labels = eval_batch["label_ids"]
 
-                eval_predictions.extend(torch.argmax(eval_logits, dim=-1).tolist())
-                eval_labels.extend(eval_batch["label_ids"].tolist())
+                all_eval_logits.append(eval_logits)
+                all_eval_labels.append(eval_labels)
 
                 batch_size = eval_logits.size(0)
                 total_eval_loss += (
@@ -509,10 +591,15 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
             total_eval_loss /= total_eval_samples
 
-            eval_metric = metric(eval_predictions, eval_labels)
+            all_eval_logits = torch.cat(all_eval_logits, dim=0)
+            all_eval_labels = torch.cat(all_eval_labels, dim=0)
+
+            eval_metric = task_generator.compute_metric(
+                all_eval_logits, all_eval_labels
+            )
 
         eval_results = {
-            "eval_language": eval_dataset.language,
+            "eval_language": task_data["eval"]["language"],
             "eval_loss": total_eval_loss,
             "eval_metric": eval_metric,
             "num_finetune_steps": total_step_num,
@@ -521,10 +608,10 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         if return_finetune_info:
             eval_results["finetune_info"] = finetune_info
 
-        if eval_type == "cross_lingual":
-            eval_results["finetune_language"] = finetune_dataset.language
-        elif eval_type == "few_shot":
-            eval_results["k"] = finetune_dataset.K
+        if task_generator.eval_type == "cross_lingual":
+            eval_results["finetune_language"] = task_data["finetune"]["language"]
+        elif task_generator.eval_type == "few_shot":
+            eval_results["k"] = task_generator.K
             eval_results["n"] = num_classes
 
         return eval_results

@@ -266,10 +266,7 @@ class MAML(BaseMetaLearner):
             }
 
         else:
-            init_kwargs = self.get_task_init_kwargs(
-                "classification",
-                self.lm_head_init_method,
-                self.lm_head_n,
+            init_kwargs = self.get_lm_head_init_kwargs(
                 data_batch=support_batch_list[0]
                 if "protomaml" in self.lm_head_init_method
                 else None,
