@@ -5,6 +5,7 @@ import abc
 import logging
 import os
 import torch
+import numpy as np
 
 from collections import defaultdict
 
@@ -26,7 +27,8 @@ tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
 
 # imports for type hints
 from configparser import ConfigParser
-from typing import Dict, Tuple, Union
+from typing import Dict, Tuple, Union, List
+from torch import Tensor
 
 # to stop the huggingface tokenizer from giving the sequence longer than 512 warning
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -53,6 +55,11 @@ class XNLIGenerator(NLUTaskGenerator):
         # location of folder containing xnli data
         self.data_dir = config.get(self.config_name, "data_dir")
 
+        if self.eval_type == "few_shot":
+            self.K = config.getint(self.config_name, "k")
+
+    ### General properties of XNLI ###
+
     @property
     def num_classes(self) -> int:
         # contradiction, entailment, neutral
@@ -62,15 +69,47 @@ class XNLIGenerator(NLUTaskGenerator):
     def task_type(self) -> str:
         return "classification"
 
+    ### Helper functions for metric computation ###
+
+    @property
+    def metric_name(self) -> str:
+        return "accuracy"
+
+    def compute_metric(self, logits: Tensor, labels: Tensor) -> float:
+        """Computes the accuracy of the model predictions"""
+        predictions = torch.argmax(logits, dim=-1).tolist()
+        labels = labels.tolist()
+        accuracy = (np.array(predictions) == np.array(labels)).sum() / len(labels)
+        return accuracy
+
+    def metric_is_better(self, curr_metric: float, best_metric: float) -> bool:
+        """Returns True if metric is better than best_metric"""
+        return curr_metric > best_metric
+
+    ### Helper functions for processing data to pass into model ###
+
+    def process_batch(self, batch: List[Tensor]) -> Dict[str, Tensor]:
+        """Processes a batch of data to be passed into the model"""
+
+        model_inputs = {
+            "input_ids": batch[0],
+            "attention_mask": batch[1],
+            "label_ids": batch[3],
+        }
+
+        return model_inputs
+
+    ### Main data iterator ###
+
     def __iter__(self) -> Dict[str, Dict[str, Union[str, TensorDataset]]]:
         """
         Loads in the data for each languages, tokenizes it, and caches it to disk. If the data
         has already been cached, then it is loaded from disk. Using the data, creates a dictionary
-        structure that contains the finetune, dev and test datasets for each language; this is
+        structure that contains the finetune, dev and eval datasets for each language; this is
         then yielded.
 
         Yields:
-            A dictionary structure storing the finetune, dev and test datasets for a single
+            A dictionary structure storing the finetune, dev and eval datasets for a single
             evaluation language.
 
                 ex. for cross-lingual evaluation english -> french
@@ -84,7 +123,7 @@ class XNLIGenerator(NLUTaskGenerator):
                             "language": "fr",
                             "dataset": torch.TensorDataset(...)
                         }
-                        "test": {
+                        "eval": {
                             "language": "fr",
                             "dataset": torch.TensorDataset(...)
                         }
@@ -100,14 +139,14 @@ class XNLIGenerator(NLUTaskGenerator):
 
             data_dict = dict()
 
-            # when using the standard evaluation type, the finetune, dev and test languages are
+            # when using the standard evaluation type, the finetune, dev and eval languages are
             # the same
-            for split in ["finetune", "dev", "test"]:
+            for split in ["finetune", "dev", "eval"]:
 
-                if self.eval_type == "few-shot" and split == "dev":
+                if self.eval_type == "few_shot" and split == "dev":
                     continue
 
-                if self.eval_type == "cross-lingual" and split == "finetune":
+                if self.eval_type == "cross_lingual" and split == "finetune":
                     split_language = "en"
                 else:
                     split_language = eval_language
@@ -146,7 +185,7 @@ class XNLIGenerator(NLUTaskGenerator):
                         examples = processor.get_dev_examples(
                             self.data_dir, language=split_language
                         )
-                    elif split == "test":
+                    elif split == "eval":
                         examples = processor.get_test_examples(
                             self.data_dir, language=split_language
                         )

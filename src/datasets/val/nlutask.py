@@ -7,6 +7,7 @@ import logging
 # import statements for type hints
 from configparser import ConfigParser
 from typing import List, Dict
+from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,8 @@ class NLUTaskGenerator(metaclass=abc.ABCMeta):
 
         assert eval_type in [
             "standard",
-            "few-shot",
-            "cross-lingual",
+            "few_shot",
+            "cross_lingual",
         ], "eval_type must be one of standard, few-shot, cross-lingual"
 
         task_name = self.__class__.__name__.split("Generator")[0]
@@ -40,6 +41,8 @@ class NLUTaskGenerator(metaclass=abc.ABCMeta):
         # specify the languages to evaluate on
         self.eval_languages = config.get(self.config_name, "eval_languages").split(",")
 
+    ### General properties of tasks ###
+
     @property
     def eval_type(self) -> str:
         """The type of evaluation that is being done (e.g. standard, few-shot, cross-lingual)"""
@@ -51,8 +54,60 @@ class NLUTaskGenerator(metaclass=abc.ABCMeta):
         """The type of NLU task (e.g. classifiation, qa)"""
         raise NotImplementedError
 
+    ### Tasks define methods for computing a metric ###
+
+    @property
+    @abc.abstractmethod
+    def metric_name(self) -> str:
+        """The name of the metric used to evaluate the task"""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def compute_metric(self, logits: Tensor, labels: Tensor) -> Dict:
+        """Compute the metric for the task given the predictions and labels"""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def metric_is_better(self, curr_metric: float, best_metric: float) -> bool:
+        """Returns True if curr_metric is better than best_metric"""
+        raise NotImplementedError
+
+    ### Helper functions for processing data to pass into model ###
+    @abc.abstractmethod
+    def process_batch(self, batch: List[Tensor]) -> Dict[str, Tensor]:
+        """
+        Given a batch of data, transform it into a dictionary of tensors that can be passed
+        into the model.
+        """
+        raise NotImplementedError
+
+    ### A method for iterating over the task that yields dicts of datasets for each language ###
+
     @abc.abstractmethod
     def __iter__(self):
+        """
+        Should yield a dictionary structure storing the finetune, dev and eval datasets for the
+        task for each language.
+
+            ex. for cross-lingual evaluation english -> french
+            [
+                {
+                    "finetune": {
+                        "language": "en",
+                        "dataset": torch.TensorDataset(...)
+                    }
+                    "dev": {
+                        "language": "fr",
+                        "dataset": torch.TensorDataset(...)
+                    }
+                    "eval": {
+                        "language": "fr",
+                        "dataset": torch.TensorDataset(...)
+                    }
+                },
+                (... for other languages similar to above)
+            ]
+        """
         raise NotImplementedError()
 
     ### Properties for finetuning the model on this task ###
@@ -76,3 +131,12 @@ class NLUTaskGenerator(metaclass=abc.ABCMeta):
     def task_head_init_method(self) -> str:
         """The method for initializing the task-specific head of the model"""
         return self._task_head_init_method
+
+    ### Finetuning related properties ###
+    @property
+    def max_patience(self) -> int:
+        return 3
+
+    @property
+    def eval_every_n_steps(self) -> int:
+        return 30
