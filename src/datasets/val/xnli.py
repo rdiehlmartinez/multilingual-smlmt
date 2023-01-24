@@ -6,6 +6,7 @@ import logging
 import os
 import torch
 import numpy as np
+import random
 
 from collections import defaultdict
 
@@ -57,6 +58,7 @@ class XNLIGenerator(NLUTaskGenerator):
 
         if self.eval_type == "few_shot":
             self.K = config.getint(self.config_name, "k")
+            self.N = self.num_classes  # alias for number of classes
 
     ### General properties of XNLI ###
 
@@ -206,6 +208,25 @@ class XNLIGenerator(NLUTaskGenerator):
 
                 # Building datasets
 
+                if self.eval_type == "few_shot" and split == "finetune":
+                    random.shuffle(features)
+
+                    support_set_labels_count = defaultdict(int)
+                    support_set_features = []
+                    support_set_size = 0
+
+                    for feature in features:
+                        label_id = feature.label
+                        if support_set_labels_count[label_id] < self.K:
+                            support_set_labels_count[label_id] += 1
+                            support_set_size += 1
+                            support_set_features.append(feature)
+
+                        if support_set_size == self.N * self.K:
+                            break
+
+                    features = support_set_features
+
                 # TODO: If the dataset is fewshot we have to select just the fewshot examples
                 # load into random sampler and randomly generate an N-way K-shot batch wrapped
                 # into a dataset
@@ -233,30 +254,34 @@ class XNLIGenerator(NLUTaskGenerator):
 
 def main():
     config = ConfigParser()
-    config.add_section("XNLI_STANDARD")
+    config.add_section("XNLI_FEW_SHOT")
     config.set(
-        "XNLI_STANDARD",
+        "XNLI_FEW_SHOT",
         "data_dir",
         "../../rds-personal-3CBQLhZjXbU/data/xtreme/download/xnli",
     )
 
     # evaluation languages
-    config.set("XNLI_STANDARD", "eval_languages", "en")
+    config.set("XNLI_FEW_SHOT", "eval_languages", "en")
 
     # adding required training parameters
-    config.set("XNLI_STANDARD", "batch_size", "16")
+    config.set("XNLI_FEW_SHOT", "batch_size", "16")
 
-    config.set("XNLI_STANDARD", "max_epochs", "16")
+    config.set("XNLI_FEW_SHOT", "max_epochs", "16")
 
-    config.set("XNLI_STANDARD", "lr", "1e-5")
+    config.set("XNLI_FEW_SHOT", "lr", "1e-5")
 
-    config.set("XNLI_STANDARD", "task_head_init_method", "standard")
+    config.set("XNLI_FEW_SHOT", "task_head_init_method", "random")
 
-    xnli_generator = XNLIGenerator(config, "standard")
+    config.set("XNLI_FEW_SHOT", "eval_type", "few_shot")
+
+    config.set("XNLI_FEW_SHOT", "k", "8")
+
+    xnli_generator = XNLIGenerator(config, "few_shot")
 
     print("iterating over the generator")
     for data_dict in xnli_generator:
-        print(data_dict)
+        pass
 
 
 if __name__ == "__main__":
