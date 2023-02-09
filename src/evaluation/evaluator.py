@@ -201,8 +201,8 @@ class Evaluator(object):
         else:
             override_gpu_device = None
 
-        eval_results = learner.run_evaluation(
-            task_generator,
+        eval_results = task_generator.run_finetune_evaluation(
+            learner,
             task_data,
             device=override_gpu_device,
         )
@@ -486,8 +486,8 @@ class Evaluator(object):
         new_best = False
 
         eval_type_task_generators_map = {
-            "standard": self.standard_task_generators,
             "few_shot": self.few_shot_task_generators,
+            "standard": self.standard_task_generators,
             "cross_lingual": self.cross_lingual_task_generators,
         }
 
