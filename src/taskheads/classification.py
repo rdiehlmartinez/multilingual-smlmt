@@ -24,7 +24,7 @@ class ClassificationHead(TaskHead):
     def __call__(
         self,
         model_outputs: torch.Tensor,
-        labels: torch.Tensor,
+        data_batch: Dict[str, torch.Tensor],
         weights: nn.ParameterDict,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -33,7 +33,8 @@ class ClassificationHead(TaskHead):
 
         Args:
             * model_outputs: output of the model
-            * labels: labels for the classification task
+            * data_batch: Batch of data for a forward pass through the model, 
+                needs to contain key 'label_ids'
             * weights: weights for the classification task
         Returns:
             * logits: logits for the classification task
@@ -59,6 +60,7 @@ class ClassificationHead(TaskHead):
             "bias": weights["classifier_bias"],
         }
 
+        labels = data_batch["label_ids"]
         logits = F.linear(model_outputs, **classifier_weights)
         loss = self.loss_function(input=logits, target=labels)
 
