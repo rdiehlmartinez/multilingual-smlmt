@@ -11,7 +11,11 @@ from .val.nlutask import NLUTaskGenerator
 from .val.xnli import (
     XNLIGenerator,
 )
+from .val.mlqa import (
+    MLQAGenerator,
+)
 
 NLU_TASK_GENERATOR_MAP = {
     "xnli": XNLIGenerator,
+    "mlqa": MLQAGenerator,
 }
