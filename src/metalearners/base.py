@@ -2,22 +2,14 @@ __author__ = "Richard Diehl Martinez"
 """ Interface class for (meta) learners """
 
 import abc
-import copy
 import logging
 import os
 import re
-
 import torch
-from torch.optim import AdamW
 
-from torch.utils.data import DataLoader, RandomSampler
-
-from ..utils import move_to_device
 from ..taskheads import TaskHead, ClassificationHead, QAHead
 
 # imports for typing
-from torch.utils.data import Dataset
-from ..datasets import NLUTaskGenerator
 from ..models import BaseModel
 from typing import Tuple, List, Dict, Union, Any, Iterator
 
@@ -91,49 +83,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         else:
             self.use_multiple_samples = use_multiple_samples
 
-    ###### Head initialization methods ######
-
-    def get_eval_task_head_init_kwargs(
-        self,
-        task_generator: NLUTaskGenerator,
-        data_batch: Dict[str, torch.Tensor] = None,
-        device: torch.device = None,
-    ) -> Dict[str, Any]:
-        """
-        Helper method for generating keyword arguments that can be passed into a task head
-        initialization method to generate a task head for evaluation.
-        NOTE: Should really only be called during evaluation
-
-        Args:
-            * task_generator: Task generator used to generate the evaluation tasks
-            * data_batch: Batch of data used to initialize the task head if using
-                the protomaml task_init_method
-            * device: Device type used to initialize the task head with, if not
-                specified defaults to self.base_device
-
-        Returns:
-            * init_kwargs (dict): Keyword arguments used by the task head initialization function
-        """
-
-        init_kwargs = {}
-
-        init_kwargs["task_type"] = task_generator.task_type
-        init_kwargs["task_init_method"] = task_generator.task_head_init_method
-
-        if task_generator.task_type == "classification":
-            init_kwargs["n_labels"] = task_generator.num_classes
-
-        init_kwargs["base_model_hidden_dim"] = self.base_model_hidden_dim
-        init_kwargs["device"] = device if device is not None else self.base_device
-
-        if "protomaml" in task_generator.task_head_init_method:
-            assert (
-                data_batch is not None
-            ), "Use of protomaml as a classification head initializer requires a data_batch"
-            init_kwargs["model"] = self.base_model
-            init_kwargs["data_batch"] = data_batch
-
-        return init_kwargs
+    ###### LM Head initialization method ######
 
     def get_lm_head_init_kwargs(
         self,
@@ -218,8 +168,8 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
 
         logits, loss = head(
             model_outputs=model_outputs,
-            labels=data_batch["label_ids"],
-            weights=task_head_weights,
+            data_batch=data_batch,
+            weights=task_head_weights
         )
 
         return (logits, loss)
@@ -321,301 +271,6 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             * loss (torch.tensor): A tensor containing the loss that results from the inner loop
         """
         raise NotImplementedError()
-
-    def run_evaluation(
-        self,
-        task_generator: NLUTaskGenerator,
-        task_data: Dict[str, Dict[str, Union[str, Dataset]]],
-        device: torch.device = None,
-    ) -> Union[Tuple[float, float], Tuple[float, float, Dict[str, List[float]]]]:
-        """
-        Runs finetuning of the model on the support set data stored in the finetune_dataset and
-        evaluates the model on the evaluation set data stored in the eval_dataset.
-
-        Args:
-            * task_generator: A task generator object that is used to generate the tasks
-            * task_data: A dictionary containing the data for the tasks
-            * device: Optional string to specify a device to override base_device
-
-        Returns:
-            * eval_metric: A float indicating the evaluation metric on the eval_dataloader
-            * eval_loss: A float indicating the loss on the eval_dataloader
-            * finetune_info: A dictionary containing the losses and accuracies for the finetuning
-                process
-
-        """
-
-        if device is None:
-            device = self.base_device
-
-        self.base_model.to(device)
-
-        # Get the finetune and eval datasets
-        finetune_dataset = task_data["finetune"]["dataset"]
-        eval_dataset = task_data["eval"]["dataset"]
-
-        # Setting up the task head for the task
-        with torch.no_grad():
-
-            if task_generator.task_head_init_method == "protomaml":
-                assert (
-                    task_generator.task_type == "classification"
-                ), "Protomaml only supports classification tasks"
-
-                # If we are using protomaml, we use the first batch of the finetune dataset
-                # to initialize the task head
-                finetune_sampler = RandomSampler(finetune_dataset)
-                finetune_dataloader = DataLoader(
-                    finetune_dataset,
-                    sampler=finetune_sampler,
-                    batch_size=task_generator.batch_size,
-                )
-
-                init_data_batch = move_to_device(
-                    task_generator.process_batch(next(iter(finetune_dataloader))),
-                    device,
-                )
-            else:
-                init_data_batch = None
-
-            init_kwargs = self.get_eval_task_head_init_kwargs(
-                task_generator,
-                data_batch=init_data_batch,
-                device=device,
-            )
-
-            task_head_weights = TaskHead.initialize_task_head(**init_kwargs)
-
-        finetune_model = copy.deepcopy(self.base_model)
-
-        # NOTE: we only train to convergence when we are training on the full dataset;
-        # otherwise, we train for a fixed number of batches (i.e. epochs)
-        train_to_convergence = task_generator.eval_type != "few_shot"
-
-        if train_to_convergence:
-            assert (
-                "dev" in task_data
-            ), "Must provide a dev dataset when training to convergence"
-
-            dev_dataset = task_data["dev"]["dataset"]
-
-            patience = task_generator.max_patience
-            best_dev_metric = None
-
-        # Setting up the optimizer
-        finetune_optimizer_param_groups = self.finetune_optimizer_param_groups(
-            finetune_model,
-            task_head_weights,
-            add_decay_information=True,
-            weight_decay_val=0.0,  # NOTE: un-tuned hyperparameter
-        )
-        finetune_optimizer = AdamW(
-            finetune_optimizer_param_groups, lr=task_generator.lr
-        )
-        finetune_model.train()
-
-        total_step_num = 0
-        early_exit_training = False
-
-        return_finetune_info = task_generator.eval_type == "standard"
-        if return_finetune_info:
-            # Setting up the training info dictionary
-            finetune_info = []
-
-        for epoch in range(task_generator.max_epochs):
-
-            if early_exit_training:
-                break
-
-            finetune_sampler = RandomSampler(finetune_dataset)
-            finetune_dataloader = DataLoader(
-                finetune_dataset,
-                sampler=finetune_sampler,
-                batch_size=task_generator.batch_size,
-            )
-
-            # Finetune the model on the data in the finetune dataloader
-            for finetune_batch in finetune_dataloader:
-
-                finetune_optimizer.zero_grad()
-
-                finetune_batch = task_generator.process_batch(finetune_batch)
-                finetune_batch = move_to_device(finetune_batch, device)
-
-                outputs = finetune_model(
-                    input_ids=finetune_batch["input_ids"],
-                    attention_mask=finetune_batch["attention_mask"],
-                )
-
-                _, loss = self._compute_task_loss(
-                    outputs,
-                    finetune_batch,
-                    task_head_weights,
-                    task_type=task_generator.task_type,
-                )
-
-                ## Average out over the batch for the dev loss
-
-                if (
-                    train_to_convergence
-                    and total_step_num % task_generator.eval_every_n_steps == 0
-                ):
-                    # Evaluating the model on the dev set to possbily break out early
-
-                    finetune_model.eval()
-
-                    all_dev_logits = []
-                    all_dev_labels = []
-
-                    total_dev_loss = 0.0
-                    total_dev_samples = 0
-
-                    with torch.no_grad():
-
-                        dev_dataloader = DataLoader(
-                            dev_dataset, batch_size=task_generator.batch_size
-                        )
-
-                        for dev_batch in dev_dataloader:
-                            dev_batch = task_generator.process_batch(dev_batch)
-                            dev_batch = move_to_device(dev_batch, device)
-
-                            dev_outputs = finetune_model(
-                                input_ids=dev_batch["input_ids"],
-                                attention_mask=dev_batch["attention_mask"],
-                            )
-
-                            dev_logits, dev_loss = self._compute_task_loss(
-                                dev_outputs,
-                                dev_batch,
-                                task_head_weights,
-                                task_type=task_generator.task_type,
-                            )
-                            dev_labels = dev_batch["label_ids"]
-
-                            all_dev_logits.append(dev_logits)
-                            all_dev_labels.append(dev_labels)
-
-                            batch_size = dev_logits.size(0)
-                            total_dev_loss += (
-                                dev_loss.detach().item() * batch_size
-                            )  # loss avg across batch
-                            total_dev_samples += batch_size
-
-                        total_dev_loss /= total_dev_samples
-
-                        all_dev_logits = torch.cat(all_dev_logits, dim=0)
-                        all_dev_labels = torch.cat(all_dev_labels, dim=0)
-
-                        # logits and labels are used by the task to compute a task-specific metric
-                        dev_metric = task_generator.compute_metric(
-                            all_dev_logits, all_dev_labels
-                        )
-
-                        if return_finetune_info:
-                            finetune_info.append(
-                                {
-                                    "finetune_loss": loss.item(),
-                                    "dev_loss": total_dev_loss,
-                                    "dev_metric": dev_metric,
-                                    "step_num": total_step_num,
-                                }
-                            )
-
-                        finetune_model.train()
-
-                        if (
-                            best_dev_metric is None
-                            or task_generator.metric_is_better(
-                                dev_metric, best_dev_metric
-                            )
-                            == dev_metric
-                        ):
-
-                            best_dev_metric = dev_metric
-                            patience = task_generator.max_patience
-                        else:
-                            patience -= 1
-                            if patience == 0:
-                                early_exit_training = True
-
-                        # TODO REMOVE ME
-                        early_exit_training = True
-
-                if early_exit_training:
-                    break
-
-                loss.backward()
-                finetune_optimizer.step()
-
-                total_step_num += 1
-
-        # Running full evaluation
-        finetune_model.eval()
-
-        all_eval_logits = []
-        all_eval_labels = []
-
-        total_eval_loss = 0.0
-        total_eval_samples = 0
-
-        eval_dataloader = DataLoader(eval_dataset, batch_size=task_generator.batch_size)
-
-        with torch.no_grad():
-
-            for eval_batch in eval_dataloader:
-                eval_batch = task_generator.process_batch(eval_batch)
-                eval_batch = move_to_device(eval_batch, device)
-
-                eval_outputs = finetune_model(
-                    input_ids=eval_batch["input_ids"],
-                    attention_mask=eval_batch["attention_mask"],
-                )
-
-                eval_logits, eval_loss = self._compute_task_loss(
-                    eval_outputs,
-                    eval_batch,
-                    task_head_weights,
-                    task_type=task_generator.task_type,
-                )
-                eval_labels = eval_batch["label_ids"]
-
-                all_eval_logits.append(eval_logits)
-                all_eval_labels.append(eval_labels)
-
-                batch_size = eval_logits.size(0)
-                total_eval_loss += (
-                    eval_loss.detach().item() * batch_size
-                )  # loss avg across batch
-                total_eval_samples += batch_size
-
-            total_eval_loss /= total_eval_samples
-
-            all_eval_logits = torch.cat(all_eval_logits, dim=0)
-            all_eval_labels = torch.cat(all_eval_labels, dim=0)
-
-            eval_metric = task_generator.compute_metric(
-                all_eval_logits, all_eval_labels
-            )
-
-        eval_results = {
-            "eval_language": task_data["eval"]["language"],
-            "eval_loss": total_eval_loss,
-            "eval_metric": eval_metric,
-            "num_finetune_steps": total_step_num,
-        }
-
-        if return_finetune_info:
-            eval_results["finetune_info"] = finetune_info
-
-        if task_generator.eval_type == "cross_lingual":
-            eval_results["finetune_language"] = task_data["finetune"]["language"]
-        elif task_generator.eval_type == "few_shot":
-            eval_results["k"] = task_generator.K
-            eval_results["n"] = num_classes
-
-        return eval_results
-
 
 class BaseMetaLearner(BaseLearner):
     def __init__(
