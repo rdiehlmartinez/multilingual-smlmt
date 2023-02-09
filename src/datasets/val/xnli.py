@@ -1,18 +1,20 @@
 __author__ = "Richard Diehl Martinez"
-""" Dataset class for iterating over XNLI data"""
+""" Task class for iterating over XNLI data"""
 
 import abc
 import logging
 import os
-import torch
 import numpy as np
 import random
+import torch
 
 from collections import defaultdict
 
 from transformers import XLMRobertaTokenizer
 
-from torch.utils.data import TensorDataset
+from torch.utils.data import TensorDataset, DataLoader, SequentialSampler 
+
+from ...utils import move_to_device
 
 # Base class for NLU Tasks
 from .nlutask import NLUTaskGenerator
@@ -28,8 +30,10 @@ tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
 
 # imports for type hints
 from configparser import ConfigParser
-from typing import Dict, Tuple, Union, List
+from typing import Dict, Union, List
 from torch import Tensor
+from ...metalearners import BaseLearner
+from ...models import BaseModel
 
 # to stop the huggingface tokenizer from giving the sequence longer than 512 warning
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -77,7 +81,79 @@ class XNLIGenerator(NLUTaskGenerator):
     def metric_name(self) -> str:
         return "accuracy"
 
-    def compute_metric(self, logits: Tensor, labels: Tensor) -> float:
+    ### Helper functions for evaluating the model on the task ###
+
+    def run_evaluation(
+        self, 
+        finetune_model: BaseModel, 
+        finetune_task_head_weights: Dict[str, torch.nn.Parameter],
+        learner: BaseLearner,
+        split_dataset: TensorDataset,
+        device: torch.device = None,
+        **kwargs
+    ) -> Dict[str, float]: 
+        """
+        After finetuning on the finetuning set, runs this evaluation hook to evaluate the model 
+        on a given vaal or eval set. 
+        """
+
+        all_logits = []
+        all_labels = []
+
+        total_loss = 0.0
+        total_samples = 0
+
+        # create a dataloader for the split dataset
+        split_dataloader = DataLoader(
+            split_dataset,
+            sampler=SequentialSampler(split_dataset),
+            batch_size=self.batch_size,
+        )
+
+        for split_batch in split_dataloader:
+
+            with torch.no_grad():
+                split_batch = self.process_batch(split_batch)
+                split_batch = move_to_device(split_batch, device)
+
+                split_outputs = finetune_model(
+                    input_ids=split_batch["input_ids"],
+                    attention_mask=split_batch["attention_mask"],
+                )
+
+                split_logits, split_loss = learner._compute_task_loss(
+                    split_outputs,
+                    split_batch,
+                    finetune_task_head_weights,
+                    task_type=self.task_type,
+                )
+
+            split_labels = split_batch["label_ids"]
+
+            all_logits.append(split_logits)
+            all_labels.append(split_labels)
+
+            batch_size = split_logits.size(0)
+            total_loss += (
+                split_loss.detach().item() * batch_size
+            )  # loss avg across batch
+            total_samples += batch_size
+
+        total_loss /= total_samples
+
+        all_logits = torch.cat(all_logits, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+
+        metric = self._compute_accuracy(
+            all_logits, all_labels
+        )
+
+        return {
+            "loss": total_loss,
+            "metric": metric,
+        }
+
+    def _compute_accuracy(self, logits: Tensor, labels: Tensor) -> float:
         """Computes the accuracy of the model predictions"""
         predictions = torch.argmax(logits, dim=-1).tolist()
         labels = labels.tolist()
@@ -85,12 +161,13 @@ class XNLIGenerator(NLUTaskGenerator):
         return accuracy
 
     def metric_is_better(self, curr_metric: float, best_metric: float) -> bool:
+        # NOTE: This must be implemented
         """Returns True if metric is better than best_metric"""
         return curr_metric > best_metric
 
     ### Helper functions for processing data to pass into model ###
 
-    def process_batch(self, batch: List[Tensor]) -> Dict[str, Tensor]:
+    def process_batch(self, batch: List[Tensor], **kwargs) -> Dict[str, Tensor]:
         """Processes a batch of data to be passed into the model"""
 
         model_inputs = {
@@ -226,10 +303,6 @@ class XNLIGenerator(NLUTaskGenerator):
                             break
 
                     features = support_set_features
-
-                # TODO: If the dataset is fewshot we have to select just the fewshot examples
-                # load into random sampler and randomly generate an N-way K-shot batch wrapped
-                # into a dataset
 
                 # Convert to Tensors and build dataset
                 all_input_ids = torch.tensor(
