@@ -8,28 +8,20 @@ import torch
 import wandb
 import numpy as np
 
-from collections import defaultdict
-from ..datasets import (
-    NLU_STANDARD_TASK_DATA_GENERATOR_MAPPING,
-    NLU_FEW_SHOT_TASK_DATA_GENERATOR_MAPPING,
-    NLU_CROSS_LINGUAL_TASK_DATA_GENERATOR_MAPPING,
-)
-from ..utils import num_gpus
-from ..utils.data import ShuffledIterableDataset
-from ..utils.evaluation import AccuracyMetric
-
-from wandb.errors import UsageError
 from multiprocessing import Pool, Manager
+
+from ..datasets import NLU_TASK_GENERATOR_MAP
+from ..utils import num_gpus
 
 logger = logging.getLogger(__name__)
 
 # Importing type hints
-from multiprocessing import Lock, Queue
-from typing import List, Callable, Union, Dict, Any
+from torch.utils.data import Dataset
+from multiprocessing import Queue
+from typing import List, Union, Dict, Any
 from configparser import ConfigParser
 from ..metalearners import BaseLearner
-from ..datasets import NLUDataset
-from ..utils.evaluation import Metric
+from ..datasets import NLUTaskGenerator
 
 
 """
@@ -78,20 +70,20 @@ class Evaluator(object):
         ]
 
         # The data generators map a specific task string ('xnli') to a generator that yields
-        # a tuple of finetune, eval datasets in different languages for that task
+        # a tuple of finetune, dev and eval datasets in different languages for that task
 
-        self.standard_task_data_generators = {
-            task: NLU_STANDARD_TASK_DATA_GENERATOR_MAPPING[task](config)
+        self.standard_task_generators = {
+            task: NLU_TASK_GENERATOR_MAP[task](config, "standard")
             for task in standard_tasks
         }
 
-        self.few_shot_task_data_generators = {
-            task: NLU_FEW_SHOT_TASK_DATA_GENERATOR_MAPPING[task](config)
+        self.few_shot_task_generators = {
+            task: NLU_TASK_GENERATOR_MAP[task](config, "few_shot")
             for task in few_shot_tasks
         }
 
-        self.cross_lingual_task_data_generators = {
-            task: NLU_CROSS_LINGUAL_TASK_DATA_GENERATOR_MAPPING[task](config)
+        self.cross_lingual_task_generators = {
+            task: NLU_TASK_GENERATOR_MAP[task](config, "cross_lingual")
             for task in cross_lingual_tasks
         }
 
@@ -103,7 +95,7 @@ class Evaluator(object):
             # NOTE: checkpoints are saved by the pipeline when the evaluation is completed -
             # however if we are saving checkpoints the evaluator needs to mark when a new
             # best model is found so that the pipeline can save the model
-            self.eval_run_tracker = defaultdict(list)
+            self.best_eval_tracker = {}
 
         self.use_wandb = config.getboolean("EXPERIMENT", "use_wandb", fallback=True)
 
@@ -181,54 +173,26 @@ class Evaluator(object):
 
     @staticmethod
     def _run_single_task(
-        finetune_dataset: NLUDataset,
-        eval_dataset: NLUDataset,
         learner: BaseLearner,
-        num_task_batches: int,
-        eval_type: str,
-        metric: Metric,
-        task_name: str,
-        task_type: str,
-        task_head_init_method: str,
-        num_classes: int,
-        batch_size: int,
-        max_epochs: int,
-        lr: float,
+        task_generator: NLUTaskGenerator,
+        task_data: Dict[str, Dict[str, Union[str, Dataset]]],
         device_queue: Union[Queue, None] = None,
     ) -> None:
         """
         Runs evaluation on a single task
 
         Args:
+            * task_generator: Task generator class that encapsulates the task (the finetune,
+                dev and eval datasets are yielded from this class)
             * finetune_dataset: Dataset to finetune on
+            * dev_dataset: Dataset to use for development
             * eval_dataset: Dataset to evaluate on
-            * learner: Learner to use for evaluation
-            * num_task_batches: Number of training batches we've seen so far
-            * eval_type: Type of task to evaluate on (standard, few_shot, cross_lingual)
-            * metric: Metric to use for evaluation
-            * task_name: Name of task to evaluate on
-            * task_type: Type of task to evaluate on
-            * task_head_init_method: Method to use for initializing the task head
-            * num_classes: Number of classes for the task
-            * batch_size: Batch size to use for evaluation
-            * max_epochs: Maximum number of epochs to finetune for
-            * lr: Learning rate to use for finetuning
             * device_queue: Queue to use for getting the next available GPU device (only
                 required if running the function via multiprocessing)
 
-        Returns (if eval_type == "standard"):
-            * eval_metric: The evaluation metric for the given task
-            * total_eval_loss: A float indicating the loss of the model on the evaluation set
-            * total_eval_loss: A float indicating the loss of the model on the evaluation set
-        Returns (if eval_type != "standard", i.e. either fewshot or crosslingual ):
-            * eval_metric: The evaluation metric for the given
-            * total_eval_loss: A float indicating the loss of the model on the evaluation set
-            * finetune_info: A list of dictionaries containing the following information:
-                * finetune_loss: The loss of the model on the finetuning set
-                * dev_loss: The loss of the model on the development set
-                * dev_metric: The metric of the model on the development set
-                * step_num: The number of steps the model has been finetuned for
-
+        Returns:
+            * eval_results: A dictionary containing the evaluation results for the task, varies
+                depending on the evaluation type (standard, few_shot or cross_lingual)
         """
 
         # get the next available GPU device if running via multiprocessing
@@ -237,31 +201,10 @@ class Evaluator(object):
         else:
             override_gpu_device = None
 
-        # NOTE: If we're not doing few_shot evaluation, then we are finetuning training on a
-        # larger dataset and we might want to hold out a dev set to monitor finetuning; if
-        # this is the case we wrap finetune_dataset in a ShuffledIterableDataset
-
-        if eval_type != "few_shot":
-            finetune_dataset = ShuffledIterableDataset(
-                finetune_dataset,
-                buffer_size=5000,
-                hold_out_dev_batch=True,
-                batch_size=batch_size,
-            )
-
-        eval_results = learner.run_evaluation(
-            finetune_dataset,
-            eval_dataset,
-            eval_type,
-            metric,
-            task_type,
-            task_head_init_method,
-            num_classes,
-            batch_size,
-            max_epochs,
-            lr,
+        eval_results = task_generator.run_finetune_evaluation(
+            learner,
+            task_data,
             device=override_gpu_device,
-            return_finetune_info=True if eval_type == "standard" else False,
         )
 
         if device_queue is not None:
@@ -293,7 +236,7 @@ class Evaluator(object):
         self,
         task_name: str,
         eval_type: str,
-        metric: Metric,
+        metric_name: str,
         num_task_batches: int,
         task_eval_results: List[Dict[str, Any]],
     ):
@@ -303,7 +246,7 @@ class Evaluator(object):
         Args:
             * task_name: Name of the task
             * eval_type: Type of evaluation
-            * metric: Metric used for evaluation
+            * metric: Name of the evaluation metric (e.g. "accuracy")
             * num_task_batches: Number of task batches that have been trained on so far
             * task_eval_results: A list of dictionaries containing the following information:
                 * eval_language: The language of the evaluation set
@@ -311,7 +254,7 @@ class Evaluator(object):
                 * eval_metric: The evaluation metric for the given task
                 * num_finetune_steps: The number of steps the model has been finetuned for
 
-                Depending on the eval_type, each dictionaru might also contain the following:
+                Depending on the eval_type, each dictionary might also contain the following:
                 * finetune_info: A list of dictionaries containing the following information:
                     * finetune_loss: The loss of the model on the finetuning set
                     * dev_loss: The loss of the model on the development set
@@ -339,7 +282,7 @@ class Evaluator(object):
         eval_metric_mean = eval_metric_sum / len(task_eval_results)
         num_finetune_steps_mean = num_finetune_steps_sum / len(task_eval_results)
 
-        logger.info(f"\t\t ({task_name}) Avg. {metric.name}: {eval_metric_mean:.4f}")
+        logger.info(f"\t\t ({task_name}) Avg. {metric_name}: {eval_metric_mean:.4f}")
         logger.info(f"\t\t ({task_name}) Avg. Loss: {eval_loss_mean:.4f}")
         logger.info(
             f"\t\t ({task_name}) Avg. Finetune Steps: {num_finetune_steps_mean:.4f}"
@@ -542,55 +485,24 @@ class Evaluator(object):
 
         new_best = False
 
-        eval_task_data_generators = {
-            "standard": self.standard_task_data_generators,
-            "few_shot": self.few_shot_task_data_generators,
-            "cross_lingual": self.cross_lingual_task_data_generators,
+        eval_type_task_generators_map = {
+            "few_shot": self.few_shot_task_generators,
+            "standard": self.standard_task_generators,
+            "cross_lingual": self.cross_lingual_task_generators,
         }
 
-        for eval_type, eval_task_data_generators in eval_task_data_generators.items():
+        for eval_type, task_generators in eval_type_task_generators_map.items():
             logger.info("*" * 20)
             logger.info(f"Evaluation type: {eval_type}")
 
-            for task_idx, (task_name, task_data_generator) in enumerate(
-                eval_task_data_generators.items()
+            for task_idx, (task_name, task_generator) in enumerate(
+                task_generators.items()
             ):
+
+                # Make each type of task run its own evaluation
+                logger.info("-" * 20)
+
                 logger.info(f"\t(Task {task_idx}) {task_name}")
-
-                # Getting task-specific parameters
-                task_type = task_data_generator.task_type
-                task_head_init_method = task_data_generator.task_head_init_method
-                num_classes = task_data_generator.num_classes
-
-                batch_size = task_data_generator.batch_size
-                max_epochs = task_data_generator.max_epochs
-                lr = task_data_generator.lr
-
-                if task_type == "classification":
-                    metric = AccuracyMetric()
-                else:
-                    logger.exception(
-                        f"Invalid task type: {task_type} for task: {task_name}"
-                    )
-                    raise Exception(
-                        f"Invalid task type: {task_type} for task: {task_name}"
-                    )
-
-                # Arguments to pass into the finetuning-evaluation routine; expressed as a
-                # tuple so that we can pass it into a process pool
-                task_args = (
-                    learner,
-                    num_task_batches,
-                    eval_type,
-                    metric,
-                    task_name,
-                    task_type,
-                    task_head_init_method,
-                    num_classes,
-                    batch_size,
-                    max_epochs,
-                    lr,
-                )
 
                 # If possible, we want to run finetuning-evaluation for each of the languages of
                 # the given task in parallel. The evaluation results for each language are returned
@@ -609,17 +521,16 @@ class Evaluator(object):
                             device_queue.put(torch.device(f"cuda:{i}"))
 
                         with Pool(num_gpus) as pool:
-
                             task_eval_results = pool.starmap(
                                 self._run_single_task,
                                 [
                                     (
-                                        finetune_dataset,
-                                        eval_dataset,
-                                        *task_args,
+                                        learner,
+                                        task_generator,
+                                        task_data,
                                         device_queue,
                                     )
-                                    for finetune_dataset, eval_dataset in task_data_generator
+                                    for task_data in task_generator
                                 ],
                             )
 
@@ -627,18 +538,22 @@ class Evaluator(object):
                     # If using a single GPU, we can just run the tasks sequentially
                     task_eval_results = []
 
-                    for finetune_dataset, eval_dataset in task_data_generator:
+                    for task_data in task_generator:
                         eval_results = self._run_single_task(
-                            finetune_dataset,
-                            eval_dataset,
-                            *task_args,
+                            learner,
+                            task_generator,
+                            task_data,
                             None,  # device_queue
                         )
                         task_eval_results.append(eval_results)
 
                 # Logging out results
                 self.log_results(
-                    task_name, eval_type, metric, num_task_batches, task_eval_results
+                    task_name,
+                    eval_type,
+                    task_generator.metric_name,
+                    num_task_batches,
+                    task_eval_results,
                 )
 
                 # If we are saving eval checkpoints, then do some book-keeping to keep track of
@@ -648,18 +563,16 @@ class Evaluator(object):
                         result["eval_metric"] for result in task_eval_results
                     ]
                     eval_metric_mean = sum(eval_metrics) / len(eval_metrics)
-                    self.eval_run_tracker[
-                        f"{task_name}.{eval_type}.{metric.name}"
-                    ].append(eval_metric_mean)
 
-                    if (
-                        metric.summary(
-                            self.eval_run_tracker[
-                                f"{task_name}.{eval_type}.{metric.name}"
-                            ]
-                        )
-                        == eval_metric_mean
+                    eval_key = f"{task_name}.{eval_type}.{task_generator.metric_name}"
+
+                    if eval_key not in self.best_eval_tracker:
+                        self.best_eval_tracker[eval_key] = eval_metric_mean
+                        new_best = True
+                    elif task_generator.metric_is_better(
+                        eval_metric_mean, self.best_eval_tracker[eval_key]
                     ):
+                        self.best_eval_tracker[eval_key] = eval_metric_mean
                         new_best = True
 
         ### If specified, possibly saving out checkpoint

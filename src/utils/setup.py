@@ -81,7 +81,11 @@ def setup(
     """
 
     # setting the start method to spawn to avoid issues with CUDA and WandB
-    mp.set_start_method("spawn")
+    try:
+        mp.set_start_method("spawn")
+    except RuntimeError:
+        if mp.get_start_method() != "spawn":
+            raise Exception("Could not set start method to spawn"")
 
     config = setup_config(config_file_path)
 

@@ -23,8 +23,8 @@ class ClassificationHead(TaskHead):
 
     def __call__(
         self,
-        model_output: torch.Tensor,
-        labels: torch.Tensor,
+        model_outputs: torch.Tensor,
+        data_batch: Dict[str, torch.Tensor],
         weights: nn.ParameterDict,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -32,27 +32,36 @@ class ClassificationHead(TaskHead):
         implementation of RobertaLMHead
 
         Args:
-            * model_output: output of the model
-            * labels: labels for the classification task
+            * model_outputs: output of the model
+            * data_batch: Batch of data for a forward pass through the model, 
+                needs to contain key 'label_ids'
             * weights: weights for the classification task
         Returns:
             * logits: logits for the classification task
             * loss: loss for the classification task
         """
+        batch_size = model_outputs.size(0)
+
+        # indexing into CLS token of model_outputs -> (batch_size, hidden_size)
+
+        model_outputs = model_outputs[
+            torch.arange(batch_size), torch.zeros((batch_size)).long()
+        ]
 
         if "fc_weight" in weights:
             fc_weights = {"weight": weights["fc_weight"], "bias": weights["fc_bias"]}
 
-            model_output = F.linear(model_output, **fc_weights)
-            model_output = F.gelu(model_output)
-            model_output = F.layer_norm(model_output, (model_output.size(-1),))
+            model_outputs = F.linear(model_outputs, **fc_weights)
+            model_outputs = F.gelu(model_outputs)
+            model_outputs = F.layer_norm(model_outputs, (model_outputs.size(-1),))
 
         classifier_weights = {
             "weight": weights["classifier_weight"],
             "bias": weights["classifier_bias"],
         }
 
-        logits = F.linear(model_output, **classifier_weights)
+        labels = data_batch["label_ids"]
+        logits = F.linear(model_outputs, **classifier_weights)
         loss = self.loss_function(input=logits, target=labels)
 
         return (logits, loss)
