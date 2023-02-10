@@ -85,7 +85,7 @@ def setup(
         mp.set_start_method("spawn")
     except RuntimeError:
         if mp.get_start_method() != "spawn":
-            raise Exception("Could not set start method to spawn"")
+            raise Exception("Could not set start method to spawn")
 
     config = setup_config(config_file_path)
 
