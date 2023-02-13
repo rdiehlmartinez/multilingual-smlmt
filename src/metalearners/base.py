@@ -278,7 +278,7 @@ class BaseMetaLearner(BaseLearner):
         initial_base_model_lr: Union[float, str] = 1e-2,
         initial_classifier_lr: Union[float, str] = 1e-1,
         num_innerloop_steps: Union[int, str] = 7,
-        use_first_order: Union[bool, str] = False,
+        use_first_order: Union[bool, str] = True,
         **kwargs,
     ) -> None:
         """
@@ -298,7 +298,7 @@ class BaseMetaLearner(BaseLearner):
             * num_innerloop_steps: Number of gradients steps in the inner loop used to learn the
                 meta-learning task
             * use_first_order: Whether a first order approximation of higher-order gradients
-                should be used
+                should be used (NOTE: THIS IS DEPRECATED - @rdiehlmartinez should be removed)
         """
         super().__init__(**kwargs)
 

@@ -422,7 +422,7 @@ class Pipeline(object):
         # metric for logging training data
         if self.use_wandb:
             wandb.define_metric(
-                "train.loss", step_metric="num_task_batches", summary="min"
+                "train_loss", step_metric="num_task_batches", summary="min"
             )
 
             if self.learner_method != "baseline":

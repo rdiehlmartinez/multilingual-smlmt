@@ -709,11 +709,9 @@ class MetaDataset(IterableDataset):
                 config.getboolean("LEARNER", "use_multiple_samples", fallback=True)
                 is True
             ):
-                assert config.getint(
-                    "LANGUAGE_TASK", "num_task_samples"
-                ) == config.getint(
+                language_task_kwargs["num_task_samples"] = config.getint(
                     "LEARNER", "num_innerloop_steps"
-                ), "num_task_samples should be equal to num_innerloop_steps"
+                )
 
             dataset = IterableLanguageTaskDataset(
                 lng_root_fp, language, seed=seed, **language_task_kwargs
