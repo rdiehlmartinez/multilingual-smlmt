@@ -165,3 +165,4 @@ xtreme/
 *.out
 machine.file.*
 tmp/
+logs/
