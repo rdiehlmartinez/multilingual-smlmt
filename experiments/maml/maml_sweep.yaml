@@ -1,0 +1,58 @@
+method: bayes
+
+parameters:
+  # -- sweep params for language task -- #
+  LANGUAGE_TASK.q:
+    values: 
+      - "2"
+      - "4"
+      - "8"
+      - "16"
+  LANGUAGE_TASK.n:
+    values:
+      - "4"
+      - "8"
+      - "16"
+      - "32"
+  LANGUAGE_TASK.k:
+    values:
+      - "2"
+      - "4"
+      - "8"
+      - "16"
+  # BASE MODEL PARAMS
+  BASE_MODEL.trainable_layers:
+    values:
+      - [0,1,2,3,4,5,6,7,8,9,10,11]
+      - [11]
+  # PIPELINE PARAMS
+  PIPELINE.meta_lr:
+    min: 0.000001
+    max: 0.001
+  PIPELINE.num_tasks_per_iteration:
+    values:
+      - "4"
+      - "8"
+      - "16"
+      - "32"
+  # LEARNER PARAMS
+  LEARNER.initial_base_model_lr:
+    min: 0.000001
+    max: 0.001
+  LEARNER.initial_classifier_lr:
+    min: 0.00001
+    max: 0.01
+  LEARNER.num_innerloop_steps:
+    values:
+      - "4"
+      - "8"
+      - "16"
+      - "32"
+
+# assuming that we have activated the correct environment
+program: run_model.py
+command:
+  - python
+  - ${program}
+  - experiments/maml/maml_default.yaml
+  - ${args}
