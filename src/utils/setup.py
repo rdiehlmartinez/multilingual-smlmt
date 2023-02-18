@@ -28,12 +28,12 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def setup_logger(config_file_path: str, run_id: int) -> None:
+def setup_logger(config_fp: str, run_id: int) -> None:
     """Set up logging functionality"""
     # Removing handlers that might be associated with environment; and logs
     # out to both stderr and a log file
     experiment_directory = os.path.dirname(
-        os.path.join(os.getcwd(), config_file_path)
+        os.path.join(os.getcwd(), config_fp)
     )
 
     for handler in logging.root.handlers[:]:
@@ -86,6 +86,7 @@ def setup(
         * resume_num_task_batches: number of task batches to resume training from
         * offline_mode: whether or not to run in offline mode
     """
+    resume_training = resume_num_task_batches > 0
 
     # setting the start method to spawn to avoid issues with CUDA and WandB
     try:
@@ -94,10 +95,30 @@ def setup(
         if mp.get_start_method() != "spawn":
             raise Exception("Could not set start method to spawn")
 
+    setup_wandb(config_fp, run_id, resume_training)
+
+    # NOTE: wandb flattens the config file during sweeps
+    # we need to unflatten it (i.e. back into a nested dictionary)
+    for config_key, config_val in wandb.config.items():
+        if not isinstance(config_val, dict):
+            primary_key, sub_key = config_key.split(".")
+            wandb.config[primary_key][sub_key] = config_val
+
+    # If config_fp is None we must be resuming a run. In this case, we will have already set the
+    # config_file parameter.
+    if config_fp is None:
+        # NOTE: if the config_file has not been set in the config file, then something's gone wrong
+        assert (
+            "config_file" in wandb.config["EXPERIMENT"]
+        ), "config_file not found in config"
+        config_fp = wandb.config["EXPERIMENT"]["config_file"]
+    else:
+        wandb.config["EXPERIMENT"]["config_file"] = config_fp
+
     setup_logger(config_fp, run_id)
 
     # we are resuming training if resume_num_task_batches is greater than 0
-    resume_training = resume_num_task_batches > 0
+
     if resume_training:
         logging.info(f"Resuming run with id: {run_id}")
     else:
@@ -106,8 +127,6 @@ def setup(
     if offline_mode:
         logging.info("Running in offline mode")
         os.environ["WANDB_MODE"] = "offline"
-
-    setup_wandb(config_fp, run_id, resume_training)
 
     seed = int(wandb.config["EXPERIMENT"]["seed"])
     # shifting over the random seed by resume_num_task_batches steps in order for the meta

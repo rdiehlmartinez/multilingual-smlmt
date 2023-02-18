@@ -138,6 +138,11 @@ class Pipeline(object):
         logger.debug("PIPELINE PARAMETERS")
         logger.debug("")
         for section, section_dict in wandb.config.items():
+            if not isinstance(section_dict, dict):
+                # if section is not a dictionary, then it has been added in by wandb and is not
+                # a parameter we set (all our parameters are nested in dictionaries)
+                continue
+
             logger.debug(f"\t {section} PARAMETERS: ")
             for key, value in section_dict.items():
                 logger.debug(f"\t\t * {key}: {value}")
