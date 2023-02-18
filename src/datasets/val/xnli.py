@@ -1,27 +1,26 @@
 __author__ = "Richard Diehl Martinez"
 """ Task class for iterating over XNLI data"""
 
-import abc
 import logging
 import os
-import numpy as np
 import random
-import torch
-
 from collections import defaultdict
 
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 from transformers import XLMRobertaTokenizer
 
-from torch.utils.data import TensorDataset, DataLoader, SequentialSampler 
+import wandb
+from lib.processors.utils import convert_examples_to_features
+
+# data processing imports
+from lib.processors.xnli import XnliProcessor
 
 from ...utils import move_to_device
 
 # Base class for NLU Tasks
 from .nlutask import NLUTaskGenerator
-
-# data processing imports
-from lib.processors.xnli import XnliProcessor
-from lib.processors.utils import convert_examples_to_features
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +28,17 @@ logger = logging.getLogger(__name__)
 tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
 
 # imports for type hints
-from configparser import ConfigParser
-from typing import Dict, Union, List
+from typing import Dict, List, Union
+
 from torch import Tensor
+
 from ...metalearners import BaseLearner
 from ...models import BaseModel
 
 # to stop the huggingface tokenizer from giving the sequence longer than 512 warning
-logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+logging.getLogger("transformers.tokenization_utils_base").setLevel(
+    logging.ERROR
+)
 
 
 class XNLIGenerator(NLUTaskGenerator):
@@ -49,19 +51,19 @@ class XNLIGenerator(NLUTaskGenerator):
 
     MAX_SEQ_LENGTH = 128
 
-    def __init__(self, config: ConfigParser, eval_type: str) -> None:
+    def __init__(self, eval_type: str) -> None:
         """
         We assume that the data for the xnli task has been downloaded as part of the
         XTREME cross-lingual benchmark (https://github.com/google-research/xtreme).
         """
 
-        super().__init__(config, eval_type)
+        super().__init__(eval_type)
 
         # location of folder containing xnli data
-        self.data_dir = config.get(self.config_name, "data_dir")
+        self.data_dir = wandb.config[self.config_name]["data_dir"]
 
         if self.eval_type == "few_shot":
-            self.K = config.getint(self.config_name, "k")
+            self.K = wandb.config[self.config_name]["k"]
             self.N = self.num_classes  # alias for number of classes
 
     ### General properties of XNLI ###
@@ -84,17 +86,17 @@ class XNLIGenerator(NLUTaskGenerator):
     ### Helper functions for evaluating the model on the task ###
 
     def run_evaluation(
-        self, 
-        finetune_model: BaseModel, 
+        self,
+        finetune_model: BaseModel,
         finetune_task_head_weights: Dict[str, torch.nn.Parameter],
         learner: BaseLearner,
         split_dataset: TensorDataset,
         device: torch.device = None,
         **kwargs
-    ) -> Dict[str, float]: 
+    ) -> Dict[str, float]:
         """
-        After finetuning on the finetuning set, runs this evaluation hook to evaluate the model 
-        on a given vaal or eval set. 
+        After finetuning on the finetuning set, runs this evaluation hook to evaluate the model
+        on a given vaal or eval set.
         """
 
         all_logits = []
@@ -111,7 +113,6 @@ class XNLIGenerator(NLUTaskGenerator):
         )
 
         for split_batch in split_dataloader:
-
             with torch.no_grad():
                 split_batch = self.process_batch(split_batch)
                 split_batch = move_to_device(split_batch, device)
@@ -144,9 +145,7 @@ class XNLIGenerator(NLUTaskGenerator):
         all_logits = torch.cat(all_logits, dim=0)
         all_labels = torch.cat(all_labels, dim=0)
 
-        metric = self._compute_accuracy(
-            all_logits, all_labels
-        )
+        metric = self._compute_accuracy(all_logits, all_labels)
 
         return {
             "loss": total_loss,
@@ -157,7 +156,9 @@ class XNLIGenerator(NLUTaskGenerator):
         """Computes the accuracy of the model predictions"""
         predictions = torch.argmax(logits, dim=-1).tolist()
         labels = labels.tolist()
-        accuracy = (np.array(predictions) == np.array(labels)).sum() / len(labels)
+        accuracy = (np.array(predictions) == np.array(labels)).sum() / len(
+            labels
+        )
         return accuracy
 
     def metric_is_better(self, curr_metric: float, best_metric: float) -> bool:
@@ -167,7 +168,9 @@ class XNLIGenerator(NLUTaskGenerator):
 
     ### Helper functions for processing data to pass into model ###
 
-    def process_batch(self, batch: List[Tensor], **kwargs) -> Dict[str, Tensor]:
+    def process_batch(
+        self, batch: List[Tensor], **kwargs
+    ) -> Dict[str, Tensor]:
         """Processes a batch of data to be passed into the model"""
 
         model_inputs = {
@@ -215,13 +218,11 @@ class XNLIGenerator(NLUTaskGenerator):
         processor = XnliProcessor()
 
         for eval_language in self.eval_languages:
-
             data_dict = dict()
 
             # when using the standard evaluation type, the finetune, dev and eval languages are
             # the same
             for split in ["finetune", "dev", "eval"]:
-
                 if self.eval_type == "few_shot" and split == "dev":
                     continue
 
@@ -314,48 +315,20 @@ class XNLIGenerator(NLUTaskGenerator):
                 all_token_type_ids = torch.tensor(
                     [f.token_type_ids for f in features], dtype=torch.long
                 )
-                all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
-
-                dataset = TensorDataset(
-                    all_input_ids, all_attention_mask, all_token_type_ids, all_labels
+                all_labels = torch.tensor(
+                    [f.label for f in features], dtype=torch.long
                 )
 
-                data_dict[split] = {"language": split_language, "dataset": dataset}
+                dataset = TensorDataset(
+                    all_input_ids,
+                    all_attention_mask,
+                    all_token_type_ids,
+                    all_labels,
+                )
+
+                data_dict[split] = {
+                    "language": split_language,
+                    "dataset": dataset,
+                }
 
             yield data_dict
-
-
-def main():
-    config = ConfigParser()
-    config.add_section("XNLI_FEW_SHOT")
-    config.set(
-        "XNLI_FEW_SHOT",
-        "data_dir",
-        "../../rds-personal-3CBQLhZjXbU/data/xtreme/download/xnli",
-    )
-
-    # evaluation languages
-    config.set("XNLI_FEW_SHOT", "eval_languages", "en")
-
-    # adding required training parameters
-    config.set("XNLI_FEW_SHOT", "batch_size", "16")
-
-    config.set("XNLI_FEW_SHOT", "max_epochs", "16")
-
-    config.set("XNLI_FEW_SHOT", "lr", "1e-5")
-
-    config.set("XNLI_FEW_SHOT", "task_head_init_method", "random")
-
-    config.set("XNLI_FEW_SHOT", "eval_type", "few_shot")
-
-    config.set("XNLI_FEW_SHOT", "k", "8")
-
-    xnli_generator = XNLIGenerator(config, "few_shot")
-
-    print("iterating over the generator")
-    for data_dict in xnli_generator:
-        pass
-
-
-if __name__ == "__main__":
-    main()

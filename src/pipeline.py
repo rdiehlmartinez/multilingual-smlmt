@@ -5,29 +5,28 @@ import sys
 
 sys.path.insert(0, "../lib")
 
-import typing
-import torch
 import logging
-import wandb
-import time
 import os
 
+# Importing type hints
+from typing import Union
+
+import torch
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LambdaLR
 from transformers import AdamW, get_linear_schedule_with_warmup
 
-from .models import XLMR
-from .metalearners import MAML, BaselineLearner
-from .evaluation import Evaluator
-from .utils import device as DEFAULT_DEVICE, num_gpus
-from .datasets import MetaDataset, MetaDataLoader
+import wandb
+
+from .datasets import MetaDataLoader, MetaDataset
 
 # used to get vocab size for model
 from .datasets.train.metadataset import VOCAB_SIZE as XLMR_VOCAB_SIZE
-
-# Importing type hints
-from configparser import ConfigParser
-from typing import Union
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
+from .evaluation import Evaluator
+from .metalearners import MAML, BaselineLearner
+from .models import XLMR
+from .utils import device as BASE_DEVICE
+from .utils import num_gpus
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ class Pipeline(object):
     Orchestrates model loading, training and evaluation using a specific type of (meta-)learner.
     """
 
-    def __init__(self, config: ConfigParser, resume_num_task_batches: int = 0) -> None:
+    def __init__(self, resume_num_task_batches: int = 0) -> None:
         """Initialize base model and meta learning method based on a config
 
         NOTE: The optional keyword argument (resume_num_task_batches) should never be manually set,
@@ -45,28 +44,20 @@ class Pipeline(object):
         error and thus spawns a new job to continue running the program.
 
         Args:
-            * config (ConfigParser): config file containing all necessary information for
-                loading in the base model and meta learning method
             * resume_num_task_batches (int): number of task batches to resume training from
         """
 
-        # config params need to be accessed by several methods
-        self.config = config
-
-        self.mode = config.get("EXPERIMENT", "mode", fallback="train")
+        self.mode = wandb.config["EXPERIMENT"]["mode"]
         if self.mode not in ["train", "inference"]:
             raise Exception(
                 f"Invalid pipeline run mode: {self.mode} - must be 'train' or 'inference'"
             )
 
         # whether to log out information to w&b
-        self.use_wandb = config.getboolean("EXPERIMENT", "use_wandb", fallback=True)
-        self.save_checkpoints = config.getboolean(
-            "EXPERIMENT", "save_checkpoints", fallback=True
-        )
+        self.save_checkpoints = wandb.config["EXPERIMENT"]["save_checkpoints"]
 
         # Setting device
-        self.base_device = config.get("PIPELINE", "device", fallback=DEFAULT_DEVICE)
+        self.base_device = BASE_DEVICE
         self.use_multiple_gpus = (
             self.base_device == torch.device("cuda") and num_gpus > 1
         )
@@ -76,62 +67,65 @@ class Pipeline(object):
             resume_num_task_batches if resume_num_task_batches else 0
         )
 
-        if self.use_wandb:
-            # setting up metrics for logging to wandb
-            # counter tracks number of batches of tasks seen by metalearner
-            wandb.define_metric("num_task_batches")
+        # setting up metrics for logging to wandb
+        # counter tracks number of batches of tasks seen by metalearner
+        wandb.define_metric("num_task_batches")
 
         # Possibly loading in a checkpoint file
         self.checkpoint = self.load_checkpoint()
 
         if self.mode == "train":
             # Setting up metadataset and meta dataloading (only for training)
-            self.meta_dataset = MetaDataset(config)
+            self.meta_dataset = MetaDataset()
 
-            self.use_smlmt_labels = config.getboolean(
-                "LANGUAGE_TASK", "use_smlmt_labels", fallback=False
-            )
+            self.use_smlmt_labels = wandb.config["LANGUAGE_TASK"][
+                "use_smlmt_labels"
+            ]
 
             self.meta_dataloader = MetaDataLoader(
                 self.meta_dataset, use_smlmt_labels=self.use_smlmt_labels
             )
 
         # setting base model
-        self.base_model_name = config.get("BASE_MODEL", "name")
+        self.base_model_name = wandb.config["BASE_MODEL"]["name"]
         self.base_model = self.load_model(self.base_model_name)
 
         # setting learner
-        self.learner_method = self.config.get("LEARNER", "method")
+        self.learner_method = wandb.config["LEARNER"]["method"]
         self.learner = self.load_learner(self.learner_method)
 
         if self.mode == "train":
             # setting meta optimization and training hyper-parameters
-            self.num_tasks_per_iteration = self.config.getint(
-                "PIPELINE", "num_tasks_per_iteration", fallback=1
-            )
-            self.eval_every_n_iteration = self.config.getint(
-                "PIPELINE", "eval_every_n_iteration", fallback=0
-            )
-            self.max_task_batch_steps = self.config.getint(
-                "PIPELINE", "max_task_batch_steps", fallback=1
-            )
+            self.num_tasks_per_iteration = wandb.config["PIPELINE"][
+                "num_tasks_per_iteration"
+            ]
+
+            self.eval_every_n_iteration = wandb.config["PIPELINE"][
+                "eval_every_n_iteration"
+            ]
+            self.max_task_batch_steps = wandb.config["PIPELINE"][
+                "max_task_batch_steps"
+            ]
 
             # setting meta learning rate
-            self.meta_lr = config.getfloat("PIPELINE", "meta_lr", fallback=1e-3)
+            self.meta_lr = wandb.config["PIPELINE"]["meta_lr"]
 
             # setting up the optimizer and learning rate scheduler for meta learning
             self.meta_optimizer = self.setup_meta_optimizer()
 
-            self.meta_lr_scheduler_method = self.config.get(
-                "PIPELINE", "meta_lr_scheduler_method", fallback=None
-            )
+            self.meta_lr_scheduler_method = wandb.config["PIPELINE"][
+                "meta_lr_scheduler_method"
+            ]
+
             self.meta_lr_scheduler = self.setup_meta_lr_scheduler(
                 self.meta_lr_scheduler_method
             )
 
         # setting evaluator
-        if "EVALUATION" in config:
-            self.evaluator = Evaluator(config, use_multiple_gpus=self.use_multiple_gpus)
+        if "EVALUATION" in wandb.config:
+            self.evaluator = Evaluator(
+                use_multiple_gpus=self.use_multiple_gpus
+            )
 
     ### -- Initialization helper functions -- ###
 
@@ -143,11 +137,14 @@ class Pipeline(object):
         logger.debug("*" * 40)
         logger.debug("PIPELINE PARAMETERS")
         logger.debug("")
-        for section in self.config:
-            if section == "DEFAULT":
+        for section, section_dict in wandb.config.items():
+            if not isinstance(section_dict, dict):
+                # if section is not a dictionary, then it has been added in by wandb and is not
+                # a parameter we set (all our parameters are nested in dictionaries)
                 continue
+
             logger.debug(f"\t {section} PARAMETERS: ")
-            for key, value in self.config[section].items():
+            for key, value in section_dict.items():
                 logger.debug(f"\t\t * {key}: {value}")
         logger.debug("*" * 40)
         logger.debug("")
@@ -163,25 +160,24 @@ class Pipeline(object):
             checkpoint_file = "latest-checkpoint.pt"
             checkpoint_run = None
         else:
-            checkpoint_file = self.config.get("LEARNER", "checkpoint_file", fallback="")
-            checkpoint_run = self.config.get("LEARNER", "checkpoint_run", fallback="")
+            if "checkpoint_file" in wandb.config["LEARNER"]:
+                checkpoint_file = wandb.config["LEARNER"]["checkpoint_file"]
+                checkpoint_run = wandb.config["LEARNER"]["checkpoint_run"]
+            else:
+                checkpoint_file = None
+                checkpoint_run = None
 
         if checkpoint_file:
-            if not self.use_wandb:
-                logger.warning(
-                    "Could not load in checkpoint file, use_wandb is set to False"
-                )
-            else:
-                logger.info(f"Loading in checkpoint file: {checkpoint_file}")
-                wandb_checkpoint = wandb.restore(
-                    checkpoint_file, run_path=checkpoint_run
-                )
-                checkpoint = torch.load(wandb_checkpoint.name)
-                os.rename(
-                    os.path.join(wandb.run.dir, checkpoint_file),
-                    os.path.join(wandb.run.dir, "loaded_checkpoint.pt"),
-                )
-                return checkpoint
+            logger.info(f"Loading in checkpoint file: {checkpoint_file}")
+            wandb_checkpoint = wandb.restore(
+                checkpoint_file, run_path=checkpoint_run
+            )
+            checkpoint = torch.load(wandb_checkpoint.name)
+            os.rename(
+                os.path.join(wandb.run.dir, checkpoint_file),
+                os.path.join(wandb.run.dir, "loaded_checkpoint.pt"),
+            )
+            return checkpoint
 
         return None
 
@@ -198,7 +194,7 @@ class Pipeline(object):
         Returns:
             * model (torch.nn.Module): base model to be used for meta learning
         """
-        model_kwargs = dict(self.config.items("BASE_MODEL"))
+        model_kwargs = wandb.config["BASE_MODEL"]
 
         if base_model_name == "xlm_r":
             model_cls = XLMR
@@ -210,7 +206,9 @@ class Pipeline(object):
 
         return model
 
-    def load_learner(self, learner_method: str) -> Union[MAML, BaselineLearner]:
+    def load_learner(
+        self, learner_method: str
+    ) -> Union[MAML, BaselineLearner]:
         """
         Helper function for reading in (meta) learning procedure
 
@@ -221,12 +219,14 @@ class Pipeline(object):
             * learner (either MAML or BaselineLearner): learner to be used for meta learning
         """
 
-        learner_kwargs = dict(self.config.items("LEARNER"))
+        learner_kwargs = wandb.config["LEARNER"]
         del learner_kwargs["method"]
 
         if self.mode == "train":
             if self.use_smlmt_labels:
-                learner_kwargs["lm_head_n"] = self.config.getint("LANGUAGE_TASK", "n")
+                learner_kwargs["lm_head_n"] = wandb.config["LANGUAGE_TASK"][
+                    "n"
+                ]
             else:
                 # size of the tokenizer vocab; NOTE that we currently only support XLM-R
                 learner_kwargs["lm_head_n"] = XLMR_VOCAB_SIZE
@@ -242,12 +242,14 @@ class Pipeline(object):
         learner = learner_cls(
             base_model=self.base_model,
             base_device=self.base_device,
-            seed=self.config.getint("EXPERIMENT", "seed"),
+            seed=wandb.config["EXPERIMENT"]["seed"],
             **learner_kwargs,
         )
 
         if self.checkpoint is not None:
-            learner.load_state_dict(self.checkpoint["learner_state_dict"], strict=False)
+            learner.load_state_dict(
+                self.checkpoint["learner_state_dict"], strict=False
+            )
 
         return learner
 
@@ -265,7 +267,9 @@ class Pipeline(object):
         meta_optimizer.zero_grad()
 
         if self.checkpoint is not None:
-            meta_optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
+            meta_optimizer.load_state_dict(
+                self.checkpoint["optimizer_state_dict"]
+            )
         return meta_optimizer
 
     def setup_meta_lr_scheduler(
@@ -312,19 +316,15 @@ class Pipeline(object):
         Args:
             * checkpoint_file (str): name of checkpoint file to save
         """
-        if not self.use_wandb:
-            logger.warning(
-                "Cannot save model checkpoint - requires use_wandb to be True"
-            )
-            return
-
         checkpoint = {
             "learner_state_dict": self.learner.state_dict(),
             "optimizer_state_dict": self.meta_optimizer.state_dict(),
         }
 
         if self.meta_lr_scheduler is not None:
-            checkpoint["scheduler_state_dict"] = self.meta_lr_scheduler.state_dict()
+            checkpoint[
+                "scheduler_state_dict"
+            ] = self.meta_lr_scheduler.state_dict()
 
         torch.save(checkpoint, os.path.join(wandb.run.dir, checkpoint_file))
         wandb.save(checkpoint_file, policy="now")
@@ -358,6 +358,8 @@ class Pipeline(object):
             f.write(str(max(self.num_task_batches - 1, 0)))
 
         self.shutdown_processes()
+
+        wandb.finish()
 
         # exit code 124 triggers re-run
         exit(124)
@@ -420,43 +422,53 @@ class Pipeline(object):
         task_batch_loss = 0
 
         # metric for logging training data
-        if self.use_wandb:
+        wandb.define_metric(
+            "train_loss", step_metric="num_task_batches", summary="min"
+        )
+
+        if self.learner_method != "baseline":
+            # any meta-learning approach will want to track the learned learning rates
             wandb.define_metric(
-                "train.loss", step_metric="num_task_batches", summary="min"
+                "classifier_lr", step_metric="num_task_batches"
             )
 
-            if self.learner_method != "baseline":
-                # any meta-learning approach will want to track the learned learning rates
-                wandb.define_metric("classifier_lr", step_metric="num_task_batches")
-
-                # for inner layers we need to track lr per layer
-                num_layers = len(self.learner.inner_layers_lr)
-                for layer_idx in range(num_layers):
-                    wandb.define_metric(
-                        f"inner_layer_{layer_idx}_lr", step_metric="num_task_batches"
-                    )
+            # for inner layers we need to track lr per layer
+            num_layers = len(self.learner.inner_layers_lr)
+            for layer_idx in range(num_layers):
+                wandb.define_metric(
+                    f"inner_layer_{layer_idx}_lr",
+                    step_metric="num_task_batches",
+                )
 
         if (
-            self.config.getboolean("PIPELINE", "run_initial_eval", fallback=True)
+            wandb.config["PIPELINE"]["run_initial_eval"]
             and self.num_task_batches == 0
         ):
             # num_task_batches would only ever not be 0 if we're resuming training because of
             # previous timeout failure, in that case don't run initial eval
             if not hasattr(self, "evaluator"):
-                logger.warning("Evaluation missing in config - skipping evaluator run")
+                logger.warning(
+                    "Evaluation missing in config - skipping evaluator run"
+                )
             else:
                 self.evaluator.run(self.learner, num_task_batches=0)
 
         ### Model training loop
 
         for task_batch_idx, task_batch in enumerate(self.meta_dataloader):
-            logger.debug(f"\t (Task idx {task_batch_idx}) Language: {task_batch[0]}")
+            logger.debug(
+                f"\t (Task idx {task_batch_idx}) Language: {task_batch[0]}"
+            )
 
             ## Basic training with just a single GPU
             task_name, support_batch_list, query_batch = task_batch
 
-            task_loss = self.learner.run_train_loop(support_batch_list, query_batch)
-            task_loss = task_loss / self.num_tasks_per_iteration  # normalizing loss
+            task_loss = self.learner.run_train_loop(
+                support_batch_list, query_batch
+            )
+            task_loss = (
+                task_loss / self.num_tasks_per_iteration
+            )  # normalizing loss
             task_batch_loss += task_loss
 
             if (task_batch_idx + 1) % self.num_tasks_per_iteration == 0:
@@ -470,36 +482,41 @@ class Pipeline(object):
                 )
 
                 ### Logging out training results
-                logger.info(f"No. batches of tasks processed: {self.num_task_batches}")
+                logger.info(
+                    f"No. batches of tasks processed: {self.num_task_batches}"
+                )
                 logger.info(f"\t(Meta) training loss: {task_batch_loss}")
-                if self.use_wandb:
 
-                    if self.learner_method != "baseline":
-                        # wandb logging info for any meta-learner
+                if self.learner_method != "baseline":
+                    # wandb logging info for any meta-learner
+                    wandb.log(
+                        {"classifier_lr": self.learner.classifier_lr.item()},
+                        commit=False,
+                    )
+
+                    for (
+                        layer_num,
+                        layer,
+                    ) in self.learner.inner_layers_lr.items():
                         wandb.log(
-                            {"classifier_lr": self.learner.classifier_lr.item()},
+                            {f"inner_layer_{layer_num}_lr": layer.item()},
                             commit=False,
                         )
 
-                        for layer_num, layer in self.learner.inner_layers_lr.items():
-                            wandb.log(
-                                {f"inner_layer_{layer_num}_lr": layer.item()},
-                                commit=False,
-                            )
-
-                    wandb.log(
-                        {
-                            "train_loss": task_batch_loss,
-                            "num_task_batches": self.num_task_batches,
-                        },
-                    )
+                wandb.log(
+                    {
+                        "train_loss": task_batch_loss,
+                        "num_task_batches": self.num_task_batches,
+                    },
+                )
 
                 task_batch_loss = 0
 
                 ### possibly run evaluation of the model
                 if (
                     self.eval_every_n_iteration
-                    and self.num_task_batches % self.eval_every_n_iteration == 0
+                    and self.num_task_batches % self.eval_every_n_iteration
+                    == 0
                 ):
                     if not hasattr(self, "evaluator"):
                         logger.warning(
@@ -507,7 +524,8 @@ class Pipeline(object):
                         )
                     else:
                         new_best = self.evaluator.run(
-                            self.learner, num_task_batches=self.num_task_batches
+                            self.learner,
+                            num_task_batches=self.num_task_batches,
                         )
 
                         if self.save_checkpoints:

@@ -1,28 +1,26 @@
 __author__ = "Richard Diehl Martinez"
 """ Deals with the orchestration of model evaluation on a variety of NLU tasks """
 
-import abc
 import logging
-import os
-import torch
-import wandb
-import numpy as np
+from multiprocessing import Manager, Pool
 
-from multiprocessing import Pool, Manager
+import torch
+
+import wandb
 
 from ..datasets import NLU_TASK_GENERATOR_MAP
 from ..utils import num_gpus
 
 logger = logging.getLogger(__name__)
 
+from multiprocessing import Queue
+from typing import Any, Dict, List, Union
+
 # Importing type hints
 from torch.utils.data import Dataset
-from multiprocessing import Queue
-from typing import List, Union, Dict, Any
-from configparser import ConfigParser
-from ..metalearners import BaseLearner
-from ..datasets import NLUTaskGenerator
 
+from ..datasets import NLUTaskGenerator
+from ..metalearners import BaseLearner
 
 """
 Main evaluator class; orchestrates the evaluation of a model on a variety of NLU tasks
@@ -30,7 +28,7 @@ Main evaluator class; orchestrates the evaluation of a model on a variety of NLU
 
 
 class Evaluator(object):
-    def __init__(self, config: ConfigParser, use_multiple_gpus: bool) -> None:
+    def __init__(self, use_multiple_gpus: bool) -> None:
         """
         Sets up dataset generators for each eval task provided in the config. The
         Evaluator class is a general framework for calling the inference procedures
@@ -38,17 +36,22 @@ class Evaluator(object):
         be evaluated on.
 
         Args:
-            * config: ConfigParser object containing the configuration for the model
-                use_multiple_gpus: Whether or not to use multiple GPUs for evaluation
             * use_multiple_gpus: Whether or not to use multiple GPUs for evaluation
         """
 
         ### read in and initialize dataset_generators
-        standard_tasks_str = config.get("EVALUATION", "standard_tasks", fallback="")
-        few_shot_tasks_str = config.get("EVALUATION", "few_shot_tasks", fallback="")
-        cross_lingual_tasks_str = config.get(
-            "EVALUATION", "cross_lingual_tasks", fallback=""
-        )
+        if "standard_tasks" not in wandb.config["EVALUATION"]:
+            wandb.config["EVALUATION"]["standard_tasks"] = ""
+        if "few_shot_tasks" not in wandb.config["EVALUATION"]:
+            wandb.config["EVALUATION"]["few_shot_tasks"] = ""
+        if "cross_lingual_tasks" not in wandb.config["EVALUATION"]:
+            wandb.config["EVALUATION"]["cross_lingual_tasks"] = ""
+
+        standard_tasks_str = wandb.config["EVALUATION"]["standard_tasks"]
+        few_shot_tasks_str = wandb.config["EVALUATION"]["few_shot_tasks"]
+        cross_lingual_tasks_str = wandb.config["EVALUATION"][
+            "cross_lingual_tasks"
+        ]
 
         if (
             standard_tasks_str == ""
@@ -58,10 +61,14 @@ class Evaluator(object):
             raise ValueError("No tasks provided for evaluation")
 
         standard_tasks = [
-            task_str for task_str in standard_tasks_str.split(",") if task_str != ""
+            task_str
+            for task_str in standard_tasks_str.split(",")
+            if task_str != ""
         ]
         few_shot_tasks = [
-            task_str for task_str in few_shot_tasks_str.split(",") if task_str != ""
+            task_str
+            for task_str in few_shot_tasks_str.split(",")
+            if task_str != ""
         ]
         cross_lingual_tasks = [
             task_str
@@ -73,23 +80,21 @@ class Evaluator(object):
         # a tuple of finetune, dev and eval datasets in different languages for that task
 
         self.standard_task_generators = {
-            task: NLU_TASK_GENERATOR_MAP[task](config, "standard")
+            task: NLU_TASK_GENERATOR_MAP[task]("standard")
             for task in standard_tasks
         }
 
         self.few_shot_task_generators = {
-            task: NLU_TASK_GENERATOR_MAP[task](config, "few_shot")
+            task: NLU_TASK_GENERATOR_MAP[task]("few_shot")
             for task in few_shot_tasks
         }
 
         self.cross_lingual_task_generators = {
-            task: NLU_TASK_GENERATOR_MAP[task](config, "cross_lingual")
+            task: NLU_TASK_GENERATOR_MAP[task]("cross_lingual")
             for task in cross_lingual_tasks
         }
 
-        self.save_checkpoints = config.getboolean(
-            "EXPERIMENT", "save_checkpoints", fallback=True
-        )
+        self.save_checkpoints = wandb.config["EXPERIMENT"]["save_checkpoints"]
 
         if self.save_checkpoints:
             # NOTE: checkpoints are saved by the pipeline when the evaluation is completed -
@@ -97,77 +102,74 @@ class Evaluator(object):
             # best model is found so that the pipeline can save the model
             self.best_eval_tracker = {}
 
-        self.use_wandb = config.getboolean("EXPERIMENT", "use_wandb", fallback=True)
-
         self.use_multiple_gpus = use_multiple_gpus
 
-        if self.use_wandb:
-            """
-            The evaluation results for each task are stored in tables in wandb; for each task we
-            store two tables: an overview table that maps training step number to the evaluation
-            results at that training step and a second that for a given evaluation run, shows the
-            finetuning process of the model i.e. maps finetuning steps to the evaluation results.
-            """
+        """
+        The evaluation results for each task are stored in tables in wandb; for each task we
+        store two tables: an overview table that maps training step number to the evaluation
+        results at that training step and a second that for a given evaluation run, shows the
+        finetuning process of the model i.e. maps finetuning steps to the evaluation results.
+        """
 
-            standard_overview_columns = [
-                "run_id",
-                "meta_train_step",
-                "eval_language",
-                "eval_loss",
-                "eval_metric",
-                "num_finetune_steps",
-            ]
+        standard_overview_columns = [
+            "run_id",
+            "meta_train_step",
+            "eval_language",
+            "eval_loss",
+            "eval_metric",
+            "num_finetune_steps",
+        ]
 
-            standard_finetune_columns = [
-                "run_id",
-                "meta_train_step",
-                "finetune_step",
-                "eval_language",
-                "finetune_loss",
-                "dev_loss",
-                "dev_metric",
-            ]
+        standard_finetune_columns = [
+            "run_id",
+            "meta_train_step",
+            "finetune_step",
+            "eval_language",
+            "finetune_loss",
+            "dev_loss",
+            "dev_metric",
+        ]
 
-            few_shot_columns = [
-                "run_id",
-                "meta_train_step",
-                "eval_language",
-                "eval_loss",
-                "eval_metric",
-                "num_finetune_steps",
-                "k",  # FEW SHOT SPECIFIC
-                "n",  # FEW SHOT SPECIFIC
-            ]
+        few_shot_columns = [
+            "run_id",
+            "meta_train_step",
+            "eval_language",
+            "eval_loss",
+            "eval_metric",
+            "num_finetune_steps",
+            "k",  # FEW SHOT SPECIFIC
+            "n",  # FEW SHOT SPECIFIC
+        ]
 
-            cross_lingual_columns = [
-                "run_id",
-                "meta_train_step",
-                "eval_language",
-                "eval_loss",
-                "eval_metric",
-                "num_finetune_steps",
-                "finetune_language",  # CROSS LINGUAL SPECIFIC
-            ]
+        cross_lingual_columns = [
+            "run_id",
+            "meta_train_step",
+            "eval_language",
+            "eval_loss",
+            "eval_metric",
+            "num_finetune_steps",
+            "finetune_language",  # CROSS LINGUAL SPECIFIC
+        ]
 
-            self.eval_tables = {}
+        self.eval_tables = {}
 
-            for task in standard_tasks:
-                self.eval_tables[task + "_standard_overview"] = wandb.Table(
-                    columns=standard_overview_columns
-                )
-                self.eval_tables[task + "_standard_finetune"] = wandb.Table(
-                    columns=standard_finetune_columns
-                )
+        for task in standard_tasks:
+            self.eval_tables[task + "_standard_overview"] = wandb.Table(
+                columns=standard_overview_columns
+            )
+            self.eval_tables[task + "_standard_finetune"] = wandb.Table(
+                columns=standard_finetune_columns
+            )
 
-            for task in few_shot_tasks:
-                self.eval_tables[task + "_few_shot"] = wandb.Table(
-                    columns=few_shot_columns
-                )
+        for task in few_shot_tasks:
+            self.eval_tables[task + "_few_shot"] = wandb.Table(
+                columns=few_shot_columns
+            )
 
-            for task in cross_lingual_tasks:
-                self.eval_tables[task + "_cross_lingual"] = wandb.Table(
-                    columns=cross_lingual_columns
-                )
+        for task in cross_lingual_tasks:
+            self.eval_tables[task + "_cross_lingual"] = wandb.Table(
+                columns=cross_lingual_columns
+            )
 
     ### Entry point to running evaluation
 
@@ -280,187 +282,198 @@ class Evaluator(object):
 
         eval_loss_mean = eval_loss_sum / len(task_eval_results)
         eval_metric_mean = eval_metric_sum / len(task_eval_results)
-        num_finetune_steps_mean = num_finetune_steps_sum / len(task_eval_results)
+        num_finetune_steps_mean = num_finetune_steps_sum / len(
+            task_eval_results
+        )
 
-        logger.info(f"\t\t ({task_name}) Avg. {metric_name}: {eval_metric_mean:.4f}")
+        logger.info(
+            f"\t\t ({task_name}) Avg. {metric_name}: {eval_metric_mean:.4f}"
+        )
         logger.info(f"\t\t ({task_name}) Avg. Loss: {eval_loss_mean:.4f}")
         logger.info(
             f"\t\t ({task_name}) Avg. Finetune Steps: {num_finetune_steps_mean:.4f}"
         )
 
-        if self.use_wandb:
+        # ==========================
+        # 1) logging out the average eval metric and loss over all eval languages at the
+        # curent num_task_batches training steps
 
-            # ==========================
-            # 1) logging out the average eval metric and loss over all eval languages at the
-            # curent num_task_batches training steps
+        average_data_log = [
+            wandb.run.id,
+            num_task_batches,
+            "average",  # averaged over all eval languages
+            eval_loss_mean,
+            eval_metric_mean,
+            num_finetune_steps_mean,
+        ]
 
-            average_data_log = [
+        if eval_type == "standard":
+            average_data_table_name = f"{task_name}_standard_overview"
+        elif eval_type == "few_shot":
+            average_data_table_name = f"{task_name}_few_shot"
+
+            # Few shot evaluation expects a k and n value to be logged
+            k = task_eval_results[0]["k"]
+            n = task_eval_results[0]["n"]
+
+            assert all(
+                [k == result["k"] for result in task_eval_results]
+            ), "k values are not the same for all eval languages"
+            assert all(
+                [n == result["n"] for result in task_eval_results]
+            ), "n values are not the same for all eval languages"
+
+            average_data_log.extend([k, n])
+        elif eval_type == "cross_lingual":
+            average_data_table_name = f"{task_name}_cross_lingual"
+
+            # Cross lingual evaluation expects a finetune language to be logged
+            finetune_lng = task_eval_results[0]["finetune_language"]
+
+            assert all(
+                [
+                    finetune_lng == result["finetune_language"]
+                    for result in task_eval_results
+                ]
+            ), "finetune languages are not the same for all eval languages"
+
+            average_data_log.append(finetune_lng)
+
+        self.eval_tables[average_data_table_name].add_data(*average_data_log)
+        # ==========================
+
+        # ==========================
+        # 2) For each individual eval language, logging out the eval metrics to wandb
+        for eval_results in task_eval_results:
+            data_log = [
                 wandb.run.id,
                 num_task_batches,
-                "average",  # averaged over all eval languages
-                eval_loss_mean,
-                eval_metric_mean,
-                num_finetune_steps_mean,
+                eval_results["eval_language"],
+                eval_results["eval_loss"],
+                eval_results["eval_metric"],
+                eval_results["num_finetune_steps"],
             ]
 
             if eval_type == "standard":
-                average_data_table_name = f"{task_name}_standard_overview"
+                data_table_name = f"{task_name}_standard_overview"
             elif eval_type == "few_shot":
-                average_data_table_name = f"{task_name}_few_shot"
-
-                # Few shot evaluation expects a k and n value to be logged
-                k = task_eval_results[0]["k"]
-                n = task_eval_results[0]["n"]
-
-                assert all(
-                    [k == result["k"] for result in task_eval_results]
-                ), "k values are not the same for all eval languages"
-                assert all(
-                    [n == result["n"] for result in task_eval_results]
-                ), "n values are not the same for all eval languages"
-
-                average_data_log.extend([k, n])
+                data_table_name = f"{task_name}_few_shot"
+                data_log.extend([eval_results["k"], eval_results["n"]])
             elif eval_type == "cross_lingual":
-                average_data_table_name = f"{task_name}_cross_lingual"
+                data_table_name = f"{task_name}_cross_lingual"
+                data_log.append(eval_results["finetune_language"])
 
-                # Cross lingual evaluation expects a finetune language to be logged
-                finetune_lng = task_eval_results[0]["finetune_language"]
+            self.eval_tables[data_table_name].add_data(*data_log)
 
-                assert all(
-                    [
-                        finetune_lng == result["finetune_language"]
-                        for result in task_eval_results
-                    ]
-                ), "finetune languages are not the same for all eval languages"
-
-                average_data_log.append(finetune_lng)
-
-            self.eval_tables[average_data_table_name].add_data(*average_data_log)
-            # ==========================
-
-            # ==========================
-            # 2) For each individual eval language, logging out the eval metrics to wandb
-            for eval_results in task_eval_results:
-
-                data_log = [
-                    wandb.run.id,
-                    num_task_batches,
-                    eval_results["eval_language"],
-                    eval_results["eval_loss"],
-                    eval_results["eval_metric"],
-                    eval_results["num_finetune_steps"],
-                ]
-
-                if eval_type == "standard":
-                    data_table_name = f"{task_name}_standard_overview"
-                elif eval_type == "few_shot":
-                    data_table_name = f"{task_name}_few_shot"
-                    data_log.extend([eval_results["k"], eval_results["n"]])
-                elif eval_type == "cross_lingual":
-                    data_table_name = f"{task_name}_cross_lingual"
-                    data_log.append(eval_results["finetune_language"])
-
-                self.eval_tables[data_table_name].add_data(*data_log)
-
-                if eval_type == "standard":
-                    # When evaluating in standard mode, we also log out the finetuning process
-                    finetune_info = eval_results["finetune_info"]
-                    eval_lng = eval_results["eval_language"]
-                    for finetune_step_info in finetune_info:
-                        # each finetune_step is a dictionary of metrics
-                        self.eval_tables[task_name + "_standard_finetune"].add_data(
-                            wandb.run.id,
-                            num_task_batches,
-                            finetune_step_info["step_num"],
-                            eval_lng,
-                            finetune_step_info["finetune_loss"],
-                            finetune_step_info["dev_loss"],
-                            finetune_step_info["dev_metric"],
-                        )
-            # ==========================
-
-            # ==========================
-            # 3) [NOTE: Optional] If we are evaluating in standard mode, we also log out
-            # the averaged metrics at each finetune step of the finetuning process
             if eval_type == "standard":
-                finetune_infos = [
-                    eval_results["finetune_info"] for eval_results in task_eval_results
-                ]
-                for all_finetune_step_info in self.zip_longest_pad_last(
-                    *finetune_infos
-                ):
-                    # zipping together the finetune info at each step for all the languages so that
-                    # we can report the average metrics at each step across all languages
-
-                    # NOTE: zip_longest_pad_last will pad the shorter lists with the last item in the
-                    # list, as a result the current finetune_step_num is the max step_num across all
-                    # languages (because some languages may have converged before others)
-
-                    finetune_step_num = max(
-                        [f_step["step_num"] for f_step in all_finetune_step_info]
-                    )
-
-                    finetune_step_loss_mean = sum(
-                        [f_step["finetune_loss"] for f_step in all_finetune_step_info]
-                    ) / len(all_finetune_step_info)
-
-                    finetune_step_dev_loss_mean = sum(
-                        [f_step["dev_loss"] for f_step in all_finetune_step_info]
-                    ) / len(all_finetune_step_info)
-
-                    finetune_step_dev_metric_mean = sum(
-                        [f_step["dev_metric"] for f_step in all_finetune_step_info]
-                    ) / len(all_finetune_step_info)
-
-                    self.eval_tables[task_name + "_standard_finetune"].add_data(
+                # When evaluating in standard mode, we also log out the finetuning process
+                finetune_info = eval_results["finetune_info"]
+                eval_lng = eval_results["eval_language"]
+                for finetune_step_info in finetune_info:
+                    # each finetune_step is a dictionary of metrics
+                    self.eval_tables[
+                        task_name + "_standard_finetune"
+                    ].add_data(
                         wandb.run.id,
                         num_task_batches,
-                        finetune_step_num,
-                        "average",
-                        finetune_step_loss_mean,
-                        finetune_step_dev_loss_mean,
-                        finetune_step_dev_metric_mean,
+                        finetune_step_info["step_num"],
+                        eval_lng,
+                        finetune_step_info["finetune_loss"],
+                        finetune_step_info["dev_loss"],
+                        finetune_step_info["dev_metric"],
                     )
+        # ==========================
 
-            # ==========================
+        # ==========================
+        # 3) [NOTE: Optional] If we are evaluating in standard mode, we also log out
+        # the averaged metrics at each finetune step of the finetuning process
+        if eval_type == "standard":
+            finetune_infos = [
+                eval_results["finetune_info"]
+                for eval_results in task_eval_results
+            ]
+            for all_finetune_step_info in self.zip_longest_pad_last(
+                *finetune_infos
+            ):
+                # zipping together the finetune info at each step for all the languages so that
+                # we can report the average metrics at each step across all languages
 
-            # 4) Push up tables to wandb
-            if eval_type == "standard":
-                wandb_overview_table_name = task_name + "_standard_overview_table"
-                wandb_finetune_table_name = task_name + "_standard_finetune_table"
+                # NOTE: zip_longest_pad_last will pad the shorter lists with the last item in the
+                # list, as a result the current finetune_step_num is the max step_num across all
+                # languages (because some languages may have converged before others)
 
-                # Reinitialization required due to ongoing bug, see:
-                # https://github.com/wandb/wandb/issues/2981
-
-                curr_wandb_overview_table = wandb.Table(
-                    columns=self.eval_tables[task_name + "_standard_overview"].columns,
-                    data=self.eval_tables[task_name + "_standard_overview"].data,
-                )
-                curr_wandb_finetune_table = wandb.Table(
-                    columns=self.eval_tables[task_name + "_standard_finetune"].columns,
-                    data=self.eval_tables[task_name + "_standard_finetune"].data,
+                finetune_step_num = max(
+                    [f_step["step_num"] for f_step in all_finetune_step_info]
                 )
 
-                wandb.log(
-                    {
-                        wandb_overview_table_name: curr_wandb_overview_table,
-                        wandb_finetune_table_name: curr_wandb_finetune_table,
-                    }
+                finetune_step_loss_mean = sum(
+                    [
+                        f_step["finetune_loss"]
+                        for f_step in all_finetune_step_info
+                    ]
+                ) / len(all_finetune_step_info)
+
+                finetune_step_dev_loss_mean = sum(
+                    [f_step["dev_loss"] for f_step in all_finetune_step_info]
+                ) / len(all_finetune_step_info)
+
+                finetune_step_dev_metric_mean = sum(
+                    [f_step["dev_metric"] for f_step in all_finetune_step_info]
+                ) / len(all_finetune_step_info)
+
+                self.eval_tables[task_name + "_standard_finetune"].add_data(
+                    wandb.run.id,
+                    num_task_batches,
+                    finetune_step_num,
+                    "average",
+                    finetune_step_loss_mean,
+                    finetune_step_dev_loss_mean,
+                    finetune_step_dev_metric_mean,
                 )
-            elif eval_type == "few_shot":
-                wandb_table_name = task_name + "_few_shot_table"
-                curr_wandb_table = wandb.Table(
-                    columns=self.eval_tables[task_name + "_few_shot"].columns,
-                    data=self.eval_tables[task_name + "_few_shot"].data,
-                )
-                wandb.log({wandb_table_name: curr_wandb_table})
-            elif eval_type == "cross_lingual":
-                wandb_table_name = task_name + "_cross_lingual_table"
-                curr_wandb_table = wandb.Table(
-                    columns=self.eval_tables[task_name + "_cross_lingual"].columns,
-                    data=self.eval_tables[task_name + "_cross_lingual"].data,
-                )
-                wandb.log({wandb_table_name: curr_wandb_table})
+
+        # ==========================
+
+        # 4) Push up tables to wandb
+        if eval_type == "standard":
+            wandb_overview_table_name = task_name + "_standard_overview_table"
+            wandb_finetune_table_name = task_name + "_standard_finetune_table"
+
+            # Reinitialization required due to ongoing bug, see:
+            # https://github.com/wandb/wandb/issues/2981
+
+            curr_wandb_overview_table = wandb.Table(
+                columns=self.eval_tables[
+                    task_name + "_standard_overview"
+                ].columns,
+                data=self.eval_tables[task_name + "_standard_overview"].data,
+            )
+            curr_wandb_finetune_table = wandb.Table(
+                columns=self.eval_tables[
+                    task_name + "_standard_finetune"
+                ].columns,
+                data=self.eval_tables[task_name + "_standard_finetune"].data,
+            )
+
+            wandb.log(
+                {
+                    wandb_overview_table_name: curr_wandb_overview_table,
+                    wandb_finetune_table_name: curr_wandb_finetune_table,
+                }
+            )
+        elif eval_type == "few_shot":
+            wandb_table_name = task_name + "_few_shot_table"
+            curr_wandb_table = wandb.Table(
+                columns=self.eval_tables[task_name + "_few_shot"].columns,
+                data=self.eval_tables[task_name + "_few_shot"].data,
+            )
+            wandb.log({wandb_table_name: curr_wandb_table})
+        elif eval_type == "cross_lingual":
+            wandb_table_name = task_name + "_cross_lingual_table"
+            curr_wandb_table = wandb.Table(
+                columns=self.eval_tables[task_name + "_cross_lingual"].columns,
+                data=self.eval_tables[task_name + "_cross_lingual"].data,
+            )
+            wandb.log({wandb_table_name: curr_wandb_table})
 
     def run(self, learner: BaseLearner, num_task_batches: int = 0) -> bool:
         """
@@ -491,14 +504,16 @@ class Evaluator(object):
             "cross_lingual": self.cross_lingual_task_generators,
         }
 
-        for eval_type, task_generators in eval_type_task_generators_map.items():
+        for (
+            eval_type,
+            task_generators,
+        ) in eval_type_task_generators_map.items():
             logger.info("*" * 20)
             logger.info(f"Evaluation type: {eval_type}")
 
             for task_idx, (task_name, task_generator) in enumerate(
                 task_generators.items()
             ):
-
                 # Make each type of task run its own evaluation
                 logger.info("-" * 20)
 
@@ -510,12 +525,10 @@ class Evaluator(object):
                 # list of dictionaries.
 
                 if self.use_multiple_gpus:
-
                     # If using multiple GPUs, we need to use a process pool with a queue to
                     # manage which GPU each process gets assigned to
 
                     with Manager() as manager:
-
                         device_queue = manager.Queue()
                         for i in range(num_gpus):
                             device_queue.put(torch.device(f"cuda:{i}"))
@@ -564,7 +577,9 @@ class Evaluator(object):
                     ]
                     eval_metric_mean = sum(eval_metrics) / len(eval_metrics)
 
-                    eval_key = f"{task_name}.{eval_type}.{task_generator.metric_name}"
+                    eval_key = (
+                        f"{task_name}.{eval_type}.{task_generator.metric_name}"
+                    )
 
                     if eval_key not in self.best_eval_tracker:
                         self.best_eval_tracker[eval_key] = eval_metric_mean

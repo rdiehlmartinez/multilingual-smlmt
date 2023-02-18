@@ -1,33 +1,32 @@
 __author__ = "Richard Diehl Martinez"
 """ Utilities for preprocessing and loading dataset """
 
-import os
-import torch
+import copy
 import gzip
-
-# import mmap
-import random
-import time
 import logging
 import math
-import copy
-import numpy as np
-
 import multiprocessing as mp
+import os
+import random
+import time
+from collections import defaultdict
 from multiprocessing.shared_memory import SharedMemory
 
+# typing imports
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
 from torch.utils.data import IterableDataset
 from transformers import XLMRobertaTokenizer
-from collections import defaultdict
 
-# typing imports
-from configparser import ConfigParser
-from typing import List, Tuple, Dict, Any
+import wandb
 
 logger = logging.getLogger(__name__)
 
 # to stop the huggingface tokenizer from giving the sequence longe than 512 warning
-logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+logging.getLogger("transformers.tokenization_utils_base").setLevel(
+    logging.ERROR
+)
 
 # NOTE: Currently assuming that we always use the XLM-Roberta tokenizer
 
@@ -65,7 +64,9 @@ class SharedMemoryBuffer(object):
         """
         Reads num_bytes of data from the buffer
         """
-        data = bytes(self._shared_memory.buf[self._index : self._index + num_bytes])
+        data = bytes(
+            self._shared_memory.buf[self._index : self._index + num_bytes]
+        )
         self._index += num_bytes
         return data
 
@@ -209,18 +210,30 @@ class IterableLanguageTaskDataset(object):
         Returns:
             * support_samples_list ([support_samples]): A list of support_samples
         """
-        support_samples_list = [defaultdict(list) for _ in range(self.num_task_samples)]
+        support_samples_list = [
+            defaultdict(list) for _ in range(self.num_task_samples)
+        ]
 
         for label, samples in support_samples.items():
-            for sub_sample_idx, support_sub_samples in enumerate(support_samples_list):
+            for sub_sample_idx, support_sub_samples in enumerate(
+                support_samples_list
+            ):
                 # samples is a list of length k*num_task_samples
-                start_index = sub_sample_idx * int(self.K / self.num_task_samples)
-                end_index = (sub_sample_idx + 1) * int(self.K / self.num_task_samples)
-                support_sub_samples[label].extend(samples[start_index:end_index])
+                start_index = sub_sample_idx * int(
+                    self.K / self.num_task_samples
+                )
+                end_index = (sub_sample_idx + 1) * int(
+                    self.K / self.num_task_samples
+                )
+                support_sub_samples[label].extend(
+                    samples[start_index:end_index]
+                )
 
         return support_samples_list
 
-    def __next__(self) -> Tuple[List[Dict[int, List[int]]], Dict[int, List[int]]]:
+    def __next__(
+        self,
+    ) -> Tuple[List[Dict[int, List[int]]], Dict[int, List[int]]]:
         """
         NOTE: Called from main process
         Reads and returns the data that has been stored in the support_data_buffer and the
@@ -255,7 +268,6 @@ class IterableLanguageTaskDataset(object):
             (query_samples, self.query_data_buffer, self.Q),
         ]:
             for n in range(self.N):
-
                 curr_n = int.from_bytes(
                     data_buffer.read(BYTE_ENCODING_SIZE), BYTE_ENDIAN_MODE
                 )
@@ -267,7 +279,9 @@ class IterableLanguageTaskDataset(object):
                 for k in range(num_samples_per_n):
                     curr_sample = []
                     while True:
-                        curr_encoded_token = data_buffer.read(BYTE_ENCODING_SIZE)
+                        curr_encoded_token = data_buffer.read(
+                            BYTE_ENCODING_SIZE
+                        )
                         if curr_encoded_token == BYTE_END_MARKER:
                             break
                         curr_token = int.from_bytes(
@@ -353,7 +367,9 @@ class IterableLanguageTaskDataset(object):
 
         # Filter out words that do not occur K times
         filtered_subword_to_sample = {
-            k: v for k, v in curr_subword_to_sample.items() if len(v) >= (K + Q)
+            k: v
+            for k, v in curr_subword_to_sample.items()
+            if len(v) >= (K + Q)
         }
 
         # Checking whether the dataset is too small
@@ -363,7 +379,9 @@ class IterableLanguageTaskDataset(object):
             logger.exception(
                 f"Cannot generate N * (K+Q) samples for dataset: {language}"
             )
-            logger.exception(f"Max possible N is: {len(filtered_subword_to_sample)}")
+            logger.exception(
+                f"Max possible N is: {len(filtered_subword_to_sample)}"
+            )
             raise
 
         # sampling mechanism for getting the N classes
@@ -386,10 +404,16 @@ class IterableLanguageTaskDataset(object):
             )
             sampled_N = sampled_N.tolist()
         else:
-            logger.exception(f"Invalid mask sampling method: {mask_sampling_method}")
-            raise Exception(f"Invalid mask sampling method: {mask_sampling_method}")
+            logger.exception(
+                f"Invalid mask sampling method: {mask_sampling_method}"
+            )
+            raise Exception(
+                f"Invalid mask sampling method: {mask_sampling_method}"
+            )
 
-        def mask_sample(k_index_information: Tuple[int, List[int]]) -> List[int]:
+        def mask_sample(
+            k_index_information: Tuple[int, List[int]]
+        ) -> List[int]:
             """
             Generates a masked out sample given information about the indices of the words
             to be masked out.
@@ -417,7 +441,9 @@ class IterableLanguageTaskDataset(object):
             # note that in a given sample there might be multiple occurences of a token
             # so we need to specify which token it is we want to mask
             subword_indices = filtered_subword_to_sample[sampled_n]
-            sampled_K_plus_Q_indices = random.sample(subword_indices, k=(K + Q))
+            sampled_K_plus_Q_indices = random.sample(
+                subword_indices, k=(K + Q)
+            )
 
             for k_index_information in sampled_K_plus_Q_indices[:K]:
                 masked_sample = mask_sample(k_index_information)
@@ -442,7 +468,9 @@ class IterableLanguageTaskDataset(object):
             * curr_buffer (SharedMemoryBuffer): buffer to write the data to
         """
         for subword_id, samples in curr_set.items():
-            curr_buffer.write(subword_id.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE))
+            curr_buffer.write(
+                subword_id.to_bytes(BYTE_ENCODING_SIZE, BYTE_ENDIAN_MODE)
+            )
             curr_buffer.write(BYTE_END_MARKER)
             for sample in samples:
                 for sample_tok_id in sample:
@@ -501,10 +529,10 @@ class IterableLanguageTaskDataset(object):
 
         while True:
             for curr_fp in file_paths:
-
-                with gzip.open(os.path.join(self.root_fp, curr_fp)) as gzip_buffer:
+                with gzip.open(
+                    os.path.join(self.root_fp, curr_fp)
+                ) as gzip_buffer:
                     for curr_line in gzip_buffer:
-
                         if curr_samples_processed < self.sample_size:
                             token_ids = self._tokenize_line(curr_line)
 
@@ -556,8 +584,10 @@ class IterableLanguageTaskDataset(object):
                                 self.write_to_buffer(
                                     support_set, self.support_data_buffer
                                 )
-                                self.write_to_buffer(query_set, self.query_data_buffer)
-                            except ValueError as e:
+                                self.write_to_buffer(
+                                    query_set, self.query_data_buffer
+                                )
+                            except ValueError:
                                 logger.exception(
                                     f"Buffer for dataset: {self.language} is used up"
                                 )
@@ -601,7 +631,7 @@ class IterableLanguageTaskDataset(object):
                 try:
                     self.write_to_buffer(support_set, self.support_data_buffer)
                     self.write_to_buffer(query_set, self.query_data_buffer)
-                except ValueError as e:
+                except ValueError:
                     logger.exception(
                         f"Buffer for dataset: {self.language} ran out of space"
                     )
@@ -624,28 +654,28 @@ class MetaDataset(IterableDataset):
     but it can fairly trivially be adapted to also produce generation of NLU tasks.
     """
 
-    def __init__(self, config: ConfigParser) -> None:
+    def __init__(self) -> None:
         """
         Initialize MetaDataset using a config file. MetaDataset is the method used for
         pre-training the meta-learning model.
         """
 
-        languages = self._get_languages(config)
-        self.datasets, self.datasets_md = self._initialize_datasets(config, languages)
+        languages = self._get_languages()
+        self.datasets, self.datasets_md = self._initialize_datasets(languages)
 
-        self.task_sampling_method = config.get(
-            "META_DATASET", "task_sampling_method", fallback="random"
-        )
+        self.task_sampling_method = wandb.config["META_DATASET"][
+            "task_sampling_method"
+        ]
 
         if self.task_sampling_method == "proportional":
-            self.task_sampling_prop_rate = config.getfloat(
-                "META_DATASET", "task_sampling_prop_rate", fallback=0.5
-            )
+            self.task_sampling_prop_rate = wandb.config["META_DATASET"][
+                "task_sampling_prop_rate"
+            ]
 
         super().__init__()
 
     @staticmethod
-    def _get_languages(config: ConfigParser) -> List[str]:
+    def _get_languages() -> List[str]:
         """
         Helper for reading in languages from config or from a file.
 
@@ -657,7 +687,8 @@ class MetaDataset(IterableDataset):
         """
         # languages_str can either be empty string, a file path or a
         # comma-separated list of iso language codes
-        languages_str = config.get("META_DATASET", f"languages")
+        languages_str = wandb.config["META_DATASET"]["languages"]
+
         if ".txt" in languages_str:
             with open(languages_str, "r") as f:
                 languages = f.read().splitlines()
@@ -667,7 +698,7 @@ class MetaDataset(IterableDataset):
         return languages
 
     def _initialize_datasets(
-        self, config: ConfigParser, languages: List[str]
+        self, languages: List[str]
     ) -> Tuple[Dict[str, IterableLanguageTaskDataset], Dict[str, Any]]:
         """
         Helper method for setting up datasets
@@ -689,31 +720,26 @@ class MetaDataset(IterableDataset):
                 size += os.stat(filepath).st_size
             return size
 
-        data_root = config.get("META_DATASET", "root_path")
+        data_root = wandb.config["META_DATASET"]["root_path"]
         datasets = {}
         datasets_md = {}
 
         # passing seed to reproduce the same data by IterableLanguageTaskDataset
-        seed = config.getint("EXPERIMENT", "seed", fallback=-1)
+        seed = wandb.config["EXPERIMENT"]["seed"]
 
         for language in languages:
             lng_root_fp = os.path.join(data_root, language)
 
             dataset_size = compute_dataset_size(lng_root_fp)
 
-            language_task_kwargs = dict(config.items("LANGUAGE_TASK"))
+            language_task_kwargs = wandb.config["LANGUAGE_TASK"]
 
             # check if when learner has use_multiple_samples to true num_inner_loop_steps
             # is equal to num_task_samples
-            if (
-                config.getboolean("LEARNER", "use_multiple_samples", fallback=True)
-                is True
-            ):
-                assert config.getint(
-                    "LANGUAGE_TASK", "num_task_samples"
-                ) == config.getint(
-                    "LEARNER", "num_innerloop_steps"
-                ), "num_task_samples should be equal to num_innerloop_steps"
+            if wandb.config["LEARNER"]["use_multiple_samples"] is True:
+                language_task_kwargs["num_task_samples"] = wandb.config[
+                    "LEARNER"
+                ]["num_innerloop_steps"]
 
             dataset = IterableLanguageTaskDataset(
                 lng_root_fp, language, seed=seed, **language_task_kwargs
