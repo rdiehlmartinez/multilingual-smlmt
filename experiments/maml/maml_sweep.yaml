@@ -1,25 +1,28 @@
 method: bayes
+metric: 
+  goal: minimize
+  name: train_loss
 
 parameters:
   # -- sweep params for language task -- #
   LANGUAGE_TASK.q:
     values: 
-      - "2"
-      - "4"
-      - "8"
-      - "16"
+      - 2
+      - 4
+      - 8
+      - 16
   LANGUAGE_TASK.n:
     values:
-      - "4"
-      - "8"
-      - "16"
-      - "32"
+      - 4
+      - 8
+      - 16
+      - 32
   LANGUAGE_TASK.k:
     values:
-      - "2"
-      - "4"
-      - "8"
-      - "16"
+      - 2
+      - 4
+      - 8
+      - 16
   # BASE MODEL PARAMS
   BASE_MODEL.trainable_layers:
     values:
@@ -31,10 +34,10 @@ parameters:
     max: 0.001
   PIPELINE.num_tasks_per_iteration:
     values:
-      - "4"
-      - "8"
-      - "16"
-      - "32"
+      - 4
+      - 8 
+      - 16
+      - 32
   # LEARNER PARAMS
   LEARNER.initial_base_model_lr:
     min: 0.000001
@@ -44,15 +47,16 @@ parameters:
     max: 0.01
   LEARNER.num_innerloop_steps:
     values:
-      - "4"
-      - "8"
-      - "16"
-      - "32"
+      - 4
+      - 8
+      - 16
+      - 32
 
 # assuming that we have activated the correct environment
 program: run_model.py
 command:
   - python
   - ${program}
+  - --path
   - experiments/maml/maml_default.yaml
   - ${args}

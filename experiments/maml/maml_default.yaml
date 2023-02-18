@@ -41,7 +41,7 @@ PIPELINE:
     num_tasks_per_iteration: 4
     eval_every_n_iteration: 100
     max_task_batch_steps: 1500
-    run_initial_eval: False
+    run_initial_eval: True
 EVALUATION:
   value:
     standard_tasks: mlqa,xnli
