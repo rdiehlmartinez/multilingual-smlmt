@@ -1,7 +1,7 @@
 method: bayes
 metric: 
   goal: minimize
-  name: train_loss
+  name: train_loss.min
 
 parameters:
   # -- sweep params for language task -- #
