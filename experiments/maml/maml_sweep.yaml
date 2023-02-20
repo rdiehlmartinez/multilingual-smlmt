@@ -1,7 +1,7 @@
 method: bayes
 metric: 
-  goal: minimize
-  name: train_loss.min
+  goal: maximize
+  name: avg_eval_metric
 
 parameters:
   # -- sweep params for language task -- #

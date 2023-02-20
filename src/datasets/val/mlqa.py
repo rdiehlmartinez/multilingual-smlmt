@@ -195,7 +195,8 @@ class MLQAGenerator(NLUTaskGenerator):
         total_loss /= total_samples
 
         return {
-            "metric": results["f1"],
+            "metric": results["f1"]
+            / 100,  # F1 is returned as a percentage; we want a decimal
             "loss": total_loss,
         }
 
