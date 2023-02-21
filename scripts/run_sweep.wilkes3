@@ -96,7 +96,7 @@ then
   # NOTE: we don't actually use the sweepid here, we pass it in to indicate that we 
   # are resuming a sweep agent
   echo "Resuming sweep agent with ID: $1; run ID: $2"
-  python run_model.py --run_id RUN_ID
+  python run_model.py --run_id $RUN_ID
 else
   echo "Invalid number of arguments (should either be 1 or 2)"
   exit 1
