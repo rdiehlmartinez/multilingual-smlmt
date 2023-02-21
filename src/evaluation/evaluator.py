@@ -14,7 +14,7 @@ from ..utils import num_gpus
 logger = logging.getLogger(__name__)
 
 from multiprocessing import Queue
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Tuple, Union
 
 # Importing type hints
 from torch.utils.data import Dataset
@@ -38,6 +38,11 @@ class Evaluator(object):
         Args:
             * use_multiple_gpus: Whether or not to use multiple GPUs for evaluation
         """
+
+        wandb.define_metric("avg_eval_metric", step_metric="num_task_batches")
+        wandb.define_metric(
+            "avg_eval_finetune_steps", step_metric="num_task_batches"
+        )
 
         ### read in and initialize dataset_generators
         if "standard_tasks" not in wandb.config["EVALUATION"]:
@@ -234,6 +239,35 @@ class Evaluator(object):
         for _ in range(max(map(len, lists))):
             yield tuple(next(g) for g in gens)
 
+    def _average_task_eval_results(
+        self,
+        task_eval_results: List[Dict[str, Any]],
+    ) -> Tuple[float, float, float]:
+        """
+        Averages the evaluation results for a task across all languages.
+
+        Returns:
+            * eval_loss_mena: The average loss across all languages
+            * eval_metric_mean: The average metric across all languages
+            * num_finetune_steps_mean: The average number of finetuning steps across all languages
+        """
+        eval_loss_sum = 0.0
+        eval_metric_sum = 0.0
+        num_finetune_steps_sum = 0.0
+
+        for eval_result in task_eval_results:
+            eval_loss_sum += eval_result["eval_loss"]
+            eval_metric_sum += eval_result["eval_metric"]
+            num_finetune_steps_sum += eval_result["num_finetune_steps"]
+
+        eval_loss_mean = eval_loss_sum / len(task_eval_results)
+        eval_metric_mean = eval_metric_sum / len(task_eval_results)
+        num_finetune_steps_mean = num_finetune_steps_sum / len(
+            task_eval_results
+        )
+
+        return (eval_loss_mean, eval_metric_mean, num_finetune_steps_mean)
+
     def log_results(
         self,
         task_name: str,
@@ -243,7 +277,7 @@ class Evaluator(object):
         task_eval_results: List[Dict[str, Any]],
     ):
         """
-        Logs out the results of the evaluation to the logger and wandb (if applicable)
+        Logs out the results of the evaluation to the logger and wandb
 
         Args:
             * task_name: Name of the task
@@ -271,20 +305,11 @@ class Evaluator(object):
                 [NOTE that this is only included if eval_type == "few_shot"]
         """
 
-        eval_loss_sum = 0.0
-        eval_metric_sum = 0.0
-        num_finetune_steps_sum = 0.0
-
-        for eval_result in task_eval_results:
-            eval_loss_sum += eval_result["eval_loss"]
-            eval_metric_sum += eval_result["eval_metric"]
-            num_finetune_steps_sum += eval_result["num_finetune_steps"]
-
-        eval_loss_mean = eval_loss_sum / len(task_eval_results)
-        eval_metric_mean = eval_metric_sum / len(task_eval_results)
-        num_finetune_steps_mean = num_finetune_steps_sum / len(
-            task_eval_results
-        )
+        (
+            eval_loss_mean,
+            eval_metric_mean,
+            num_finetune_steps_mean,
+        ) = self._average_task_eval_results(task_eval_results)
 
         logger.info(
             f"\t\t ({task_name}) Avg. {metric_name}: {eval_metric_mean:.4f}"
@@ -504,6 +529,10 @@ class Evaluator(object):
             "cross_lingual": self.cross_lingual_task_generators,
         }
 
+        # across all types of evaluation, all tasks and all languages
+        all_eval_metric_means = []
+        all_num_finetune_steps_mean = []
+
         for (
             eval_type,
             task_generators,
@@ -569,6 +598,19 @@ class Evaluator(object):
                     task_eval_results,
                 )
 
+                # The eval metric mean and mean number of finetune steps for this given task
+                # (i.e. averaged across all languages in the task)
+                (
+                    _,
+                    task_eval_metric_mean,
+                    task_num_finetune_steps_mean,
+                ) = self._average_task_eval_results(task_eval_results)
+
+                all_eval_metric_means.append(task_eval_metric_mean)
+                all_num_finetune_steps_mean.append(
+                    task_num_finetune_steps_mean
+                )
+
                 # If we are saving eval checkpoints, then do some book-keeping to keep track of
                 # the best model
                 if self.save_checkpoints:
@@ -589,6 +631,22 @@ class Evaluator(object):
                     ):
                         self.best_eval_tracker[eval_key] = eval_metric_mean
                         new_best = True
+
+        # averaging together the eval metric means and mean number of finetune steps across all tasks
+        all_eval_metric_mean = sum(all_eval_metric_means) / len(
+            all_eval_metric_means
+        )
+        all_num_finetune_steps_mean = sum(all_num_finetune_steps_mean) / len(
+            all_num_finetune_steps_mean
+        )
+        # logging these out to wandb
+
+        wandb.log(
+            {
+                "avg_eval_metric": all_eval_metric_mean,
+                "avg_eval_finetune_steps": all_num_finetune_steps_mean,
+            }
+        )
 
         ### If specified, possibly saving out checkpoint
         logger.info("*" * 20)

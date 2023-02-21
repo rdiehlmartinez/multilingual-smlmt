@@ -359,8 +359,6 @@ class Pipeline(object):
 
         self.shutdown_processes()
 
-        wandb.finish()
-
         # exit code 124 triggers re-run
         exit(124)
 

@@ -90,13 +90,13 @@ then
   echo "Generating new run with ID: $JOBID"
   sweepid=$1
   export RUN_ID=$JOBID
-  timeout -s SIGINT --kill-after=5m 11h wandb agent --count 1 $sweepid 
+  timeout -s SIGINT --kill-after=10m 11h wandb agent --count 1 $sweepid 
 elif [[ $# -eq 2 ]]
 then
   # NOTE: we don't actually use the sweepid here, we pass it in to indicate that we 
   # are resuming a sweep agent
   echo "Resuming sweep agent with ID: $1; run ID: $2"
-  python run_model.py --run_id RUN_ID
+  python run_model.py --run_id $RUN_ID
 else
   echo "Invalid number of arguments (should either be 1 or 2)"
   exit 1

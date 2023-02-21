@@ -43,12 +43,6 @@ parameters:
       - 32
       - 64
   # LEARNER PARAMS
-  LEARNER.initial_base_model_lr:
-    min: 0.000001
-    max: 0.001
-  LEARNER.initial_classifier_lr:
-    min: 0.00001
-    max: 0.01
   LEARNER.num_innerloop_steps:
     values:
       - 4
@@ -62,5 +56,5 @@ command:
   - python
   - ${program}
   - --path
-  - experiments/maml/maml_default.yaml
+  - experiments/baseline/baseline_default.yaml
   - ${args}

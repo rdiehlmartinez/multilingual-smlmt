@@ -96,13 +96,14 @@ echo "Time: `date`"
 echo "Running on master node: `hostname`"
 echo "Current directory: `pwd`"
 
-if [ "$SLURM_JOB_NODELIST" ]; then
-        #! Create a machine file:
-        export NODEFILE=`generate_pbs_nodefile`
-        cat $NODEFILE | uniq > machine.file.$JOBID
-        echo -e "\nNodes allocated:\n================"
-        echo `cat machine.file.$JOBID | sed -e 's/\..*$//g'`
-fi
+# Uncomment to generate a machine file (pretty ugly NGL)
+# if [ "$SLURM_JOB_NODELIST" ]; then
+#         #! Create a machine file:
+#         export NODEFILE=`generate_pbs_nodefile`
+#         cat $NODEFILE | uniq > machine.file.$JOBID
+#         echo -e "\nNodes allocated:\n================"
+#         echo `cat machine.file.$JOBID | sed -e 's/\..*$//g'`
+# fi
 
 echo -e "\nnumtasks=$numtasks, numnodes=$numnodes, mpi_tasks_per_node=$mpi_tasks_per_node (OMP_NUM_THREADS=$OMP_NUM_THREADS)"
 

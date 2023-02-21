@@ -166,3 +166,6 @@ xtreme/
 machine.file.*
 tmp/
 logs/
+
+# Don't include the misc 
+misc/

@@ -6,12 +6,11 @@ from multiprocessing import Pool, cpu_count
 
 import numpy as np
 from tqdm import tqdm
-
+from transformers import DataProcessor
 from transformers.file_utils import is_tf_available, is_torch_available
 from transformers.models.bert.tokenization_bert import (
     whitespace_tokenize,
 )  # updated to work with transformers >4.0.0
-from transformers import DataProcessor
 
 if is_torch_available():
     import torch
@@ -36,7 +35,9 @@ def _improve_answer_span(
     if lang2id is None:
         tok_answer_text = " ".join(tokenizer.tokenize(orig_answer_text))
     else:
-        tok_answer_text = " ".join(tokenizer.tokenize(orig_answer_text, lang=lang))
+        tok_answer_text = " ".join(
+            tokenizer.tokenize(orig_answer_text, lang=lang)
+        )
 
     for new_start in range(input_start, input_end + 1):
         for new_end in range(input_end, new_start - 1, -1):
@@ -51,7 +52,7 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
     """Check if this is the 'max context' doc span for the token."""
     best_score = None
     best_span_index = None
-    for (span_index, doc_span) in enumerate(doc_spans):
+    for span_index, doc_span in enumerate(doc_spans):
         end = doc_span.start + doc_span.length - 1
         if position < doc_span.start:
             continue
@@ -59,7 +60,9 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
             continue
         num_left_context = position - doc_span.start
         num_right_context = end - position
-        score = min(num_left_context, num_right_context) + 0.01 * doc_span.length
+        score = (
+            min(num_left_context, num_right_context) + 0.01 * doc_span.length
+        )
         if best_score is None or score > best_score:
             best_score = score
             best_span_index = span_index
@@ -73,7 +76,7 @@ def _new_check_is_max_context(doc_spans, cur_span_index, position):
     # return True
     best_score = None
     best_span_index = None
-    for (span_index, doc_span) in enumerate(doc_spans):
+    for span_index, doc_span in enumerate(doc_spans):
         end = doc_span["start"] + doc_span["length"] - 1
         if position < doc_span["start"]:
             continue
@@ -81,7 +84,10 @@ def _new_check_is_max_context(doc_spans, cur_span_index, position):
             continue
         num_left_context = position - doc_span["start"]
         num_right_context = end - position
-        score = min(num_left_context, num_right_context) + 0.01 * doc_span["length"]
+        score = (
+            min(num_left_context, num_right_context)
+            + 0.01 * doc_span["length"]
+        )
         if best_score is None or score > best_score:
             best_score = score
             best_span_index = span_index
@@ -105,19 +111,25 @@ def squad_convert_example_to_features(
         end_position = example.end_position
 
         # If the answer cannot be found in the text, then skip this example.
-        actual_text = " ".join(example.doc_tokens[start_position : (end_position + 1)])
-        cleaned_answer_text = " ".join(whitespace_tokenize(example.answer_text))
-        
+        actual_text = " ".join(
+            example.doc_tokens[start_position : (end_position + 1)]
+        )
+        cleaned_answer_text = " ".join(
+            whitespace_tokenize(example.answer_text)
+        )
+
         if actual_text.find(cleaned_answer_text) == -1:
             logger.warning(
-                "Could not find answer: '%s' vs. '%s'", actual_text, cleaned_answer_text
+                "Could not find answer: '%s' vs. '%s'",
+                actual_text,
+                cleaned_answer_text,
             )
             return []
 
     tok_to_orig_index = []
     orig_to_tok_index = []
     all_doc_tokens = []
-    for (i, token) in enumerate(example.doc_tokens):
+    for i, token in enumerate(example.doc_tokens):
         orig_to_tok_index.append(len(all_doc_tokens))
         if lang2id is None:
             sub_tokens = tokenizer.tokenize(token)
@@ -158,12 +170,13 @@ def squad_convert_example_to_features(
         if "roberta" in str(type(tokenizer))
         else tokenizer.model_max_length - tokenizer.max_len_single_sentence
     )
-    sequence_pair_added_tokens = tokenizer.model_max_length - tokenizer.max_len_sentences_pair
+    sequence_pair_added_tokens = (
+        tokenizer.model_max_length - tokenizer.max_len_sentences_pair
+    )
 
     span_doc_tokens = all_doc_tokens
 
     while len(spans) * doc_stride < len(all_doc_tokens):
-
         encoded_dict = tokenizer(
             truncated_query_tokens
             if tokenizer.padding_side == "right"
@@ -206,7 +219,9 @@ def squad_convert_example_to_features(
                 if tokenizer.padding_side == "right"
                 else i
             )
-            token_to_orig_map[index] = tok_to_orig_index[len(spans) * doc_stride + i]
+            token_to_orig_map[index] = tok_to_orig_index[
+                len(spans) * doc_stride + i
+            ]
 
         encoded_dict["paragraph_len"] = paragraph_len
         encoded_dict["tokens"] = tokens
@@ -237,10 +252,14 @@ def squad_convert_example_to_features(
             index = (
                 j
                 if tokenizer.padding_side == "left"
-                else spans[doc_span_index]["truncated_query_with_special_tokens_length"]
+                else spans[doc_span_index][
+                    "truncated_query_with_special_tokens_length"
+                ]
                 + j
             )
-            spans[doc_span_index]["token_is_max_context"][index] = is_max_context
+            spans[doc_span_index]["token_is_max_context"][
+                index
+            ] = is_max_context
 
     for span in spans:
         # Identify the position of the CLS token
@@ -256,7 +275,9 @@ def squad_convert_example_to_features(
             # Limit positive values to one
             p_mask = 1 - p_mask
 
-        p_mask[np.where(np.array(span["input_ids"]) == tokenizer.sep_token_id)[0]] = 1
+        p_mask[
+            np.where(np.array(span["input_ids"]) == tokenizer.sep_token_id)[0]
+        ] = 1
 
         # Set the CLS index to '0'
         p_mask[cls_index] = 0
@@ -271,7 +292,9 @@ def squad_convert_example_to_features(
             doc_end = span["start"] + span["length"] - 1
             out_of_span = False
 
-            if not (tok_start_position >= doc_start and tok_end_position <= doc_end):
+            if not (
+                tok_start_position >= doc_start and tok_end_position <= doc_end
+            ):
                 out_of_span = True
 
             if out_of_span:
@@ -382,17 +405,20 @@ def squad_convert_examples_to_features(
                 p.imap(annotate_, examples, chunksize=32),
                 total=len(examples),
                 desc="convert squad examples to features",
-                disable=True
+                disable=True,
             )
         )
     new_features = []
     unique_id = 1000000000
     example_index = 0
     for example_features in tqdm(
-        features, total=len(features), desc="add example index and unique id", disable=True
+        features,
+        total=len(features),
+        desc="add example index and unique id",
+        disable=True,
     ):
         if not example_features:
-            continuezs
+            continue
         for example_feature in example_features:
             example_feature.example_index = example_index
             example_feature.unique_id = unique_id
@@ -403,21 +429,31 @@ def squad_convert_examples_to_features(
     del new_features
     if return_dataset == "pt":
         if not is_torch_available():
-            raise RuntimeError("PyTorch must be installed to return a PyTorch dataset.")
+            raise RuntimeError(
+                "PyTorch must be installed to return a PyTorch dataset."
+            )
 
         # Convert to Tensors and build dataset
-        all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+        all_input_ids = torch.tensor(
+            [f.input_ids for f in features], dtype=torch.long
+        )
         all_attention_masks = torch.tensor(
             [f.attention_mask for f in features], dtype=torch.long
         )
         all_token_type_ids = torch.tensor(
             [f.token_type_ids for f in features], dtype=torch.long
         )
-        all_cls_index = torch.tensor([f.cls_index for f in features], dtype=torch.long)
-        all_p_mask = torch.tensor([f.p_mask for f in features], dtype=torch.float)
+        all_cls_index = torch.tensor(
+            [f.cls_index for f in features], dtype=torch.long
+        )
+        all_p_mask = torch.tensor(
+            [f.p_mask for f in features], dtype=torch.float
+        )
         all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
 
-        all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
+        all_example_index = torch.arange(
+            all_input_ids.size(0), dtype=torch.long
+        )
 
         # IF TRAINING
         all_start_positions = torch.tensor(
@@ -432,7 +468,7 @@ def squad_convert_examples_to_features(
             all_token_type_ids,
             all_start_positions,
             all_end_positions,
-            all_example_index, # Added into 5th index position to preserve expecation of original code
+            all_example_index,  # Added into 5th index position to preserve expecation of original code
             all_cls_index,
             all_p_mask,
             all_langs,
@@ -510,7 +546,10 @@ class SquadProcessor(DataProcessor):
             answers = []
         else:
             answers = [
-                {"answer_start": start.numpy(), "text": text.numpy().decode("utf-8")}
+                {
+                    "answer_start": start.numpy(),
+                    "text": text.numpy().decode("utf-8"),
+                }
                 for start, text in zip(
                     tensor_dict["answers"]["answer_start"],
                     tensor_dict["answers"]["text"],
@@ -558,7 +597,9 @@ class SquadProcessor(DataProcessor):
         examples = []
         for tensor_dict in tqdm(dataset, disable=True):
             examples.append(
-                self._get_example_from_tensor_dict(tensor_dict, evaluate=evaluate)
+                self._get_example_from_tensor_dict(
+                    tensor_dict, evaluate=evaluate
+                )
             )
 
         return examples
@@ -588,9 +629,7 @@ class SquadProcessor(DataProcessor):
             input_data = json.load(reader)["data"]
         return self._create_examples(input_data, language)
 
-
     def _create_examples(self, input_data, language):
-
         examples = []
         for entry in tqdm(input_data, disable=True):
             title = entry["title"] if "title" in entry else ""
@@ -609,13 +648,12 @@ class SquadProcessor(DataProcessor):
                         is_impossible = False
 
                     if not is_impossible:
-
                         answer = qa["answers"][0]
                         answer_text = answer["text"]
                         start_position_character = answer["answer_start"]
-                        
-                        # BEFORE THESE WERE SPLIT UP, -- answers are for evaluation; 
-                        # but to get the loss, we want start position 
+
+                        # BEFORE THESE WERE SPLIT UP, -- answers are for evaluation;
+                        # but to get the loss, we want start position
                         answers = qa["answers"]
 
                     example = SquadExample(
