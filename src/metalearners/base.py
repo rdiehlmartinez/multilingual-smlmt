@@ -26,6 +26,7 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
         lm_head_n: Union[int, str] = 10,
         retain_lm_head: Union[bool, str] = False,
         use_multiple_samples: Union[bool, str] = True,
+        num_innerloop_steps: Union[int, str] = 7,
     ) -> None:
         """
         BaseLearner establishes the inferface for the learner class.
@@ -43,6 +44,8 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             * use_multiple_samples: We can specify whether each learning step that the BaseLearner
                 takes relies on only a single sample of an N-way K-shot task, or whether the
                 learner can have access to multiple sample of an N-way K-shot task.
+            * num_innerloop_steps: Number of gradients steps in the inner loop used to learn the
+                meta-learning task
         """
         super().__init__()
         self.seed = seed
@@ -82,6 +85,9 @@ class BaseLearner(torch.nn.Module, metaclass=abc.ABCMeta):
             self.use_multiple_samples = eval(use_multiple_samples)
         else:
             self.use_multiple_samples = use_multiple_samples
+
+        # number of steps to perform in the inner loop
+        self.num_innerloop_steps = int(num_innerloop_steps)
 
     ###### LM Head initialization method ######
 
@@ -277,7 +283,6 @@ class BaseMetaLearner(BaseLearner):
         self,
         initial_base_model_lr: Union[float, str] = 1e-2,
         initial_classifier_lr: Union[float, str] = 1e-1,
-        num_innerloop_steps: Union[int, str] = 7,
         use_first_order: Union[bool, str] = True,
         **kwargs,
     ) -> None:
@@ -295,8 +300,6 @@ class BaseMetaLearner(BaseLearner):
                 - this value is learned over the course of meta-learning
             * initial_classifier_lr: Initial inner-loop learning rate of the classifier head
                 - this value is learned over the course of meta-learning
-            * num_innerloop_steps: Number of gradients steps in the inner loop used to learn the
-                meta-learning task
             * use_first_order: Whether a first order approximation of higher-order gradients
                 should be used (NOTE: THIS IS DEPRECATED - @rdiehlmartinez should be removed)
         """
@@ -322,9 +325,6 @@ class BaseMetaLearner(BaseLearner):
             in the same layer contain the string 'layer.[number]' as part of their name.
             """
             )
-
-        # number of steps to perform in the inner loop
-        self.num_innerloop_steps = int(num_innerloop_steps)
 
         # set flag to indicate if first-order approximation should be used (à la Reptile)
         if isinstance(use_first_order, str):
