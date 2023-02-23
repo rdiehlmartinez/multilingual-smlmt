@@ -2,7 +2,8 @@ EXPERIMENT:
   value:
     seed: 42
     mode: train
-    save_checkpoints: True
+    save_best_checkpoints: True
+    config_fp: experiments/baseline/baseline_default.yaml
 META_DATASET:
   value:
     root_path: ../../rds-personal-3CBQLhZjXbU/data/oscar

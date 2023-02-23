@@ -70,8 +70,10 @@ def setup_wandb(config_fp: str, run_id: str, resume_training: bool) -> None:
 def setup(
     config_fp: str,
     run_id: str,
+    wandb_run_id: str,
     resume_num_task_batches: int,
     offline_mode: bool,
+    sweep_agent: bool,
 ) -> None:
     """
     Reads in config file into wandb init, sets up logger and sets a seed to ensure reproducibility.
@@ -81,10 +83,12 @@ def setup(
     error and thus spawns a new job to continue running the program.
 
     Args:
-        * config_fp: path to config file
+        * config_fp: path to config file (possibly NONE)
         * run_id: id of the run
+        * wandb_run_id: id of the wandb run (possibly NONE)
         * resume_num_task_batches: number of task batches to resume training from
         * offline_mode: whether or not to run in offline mode
+        * sweep_agent: whether or not the program is being run by a sweep agent
     """
     resume_training = resume_num_task_batches > 0
 
@@ -95,38 +99,39 @@ def setup(
         if mp.get_start_method() != "spawn":
             raise Exception("Could not set start method to spawn")
 
-    setup_wandb(config_fp, run_id, resume_training)
+    if offline_mode:
+        os.environ["WANDB_MODE"] = "offline"
 
-    # NOTE: wandb flattens the config file during sweeps
-    # we need to unflatten it (i.e. back into a nested dictionary)
-    for config_key, config_val in wandb.config.items():
-        if not isinstance(config_val, dict):
-            primary_key, sub_key = config_key.split(".")
-            wandb.config[primary_key][sub_key] = config_val
+    setup_wandb(config_fp, wandb_run_id, resume_training)
 
-    # If config_fp is None we must be resuming a run. In this case, we will have already set the
-    # config_file parameter.
+    if sweep_agent:
+         # If this is being run by a sweep agent, setuping wandb in previous call will 
+         # assign the wandb run_id 
+        wandb_run_id = wandb.run.id
+
+        # NOTE: wandb flattens the config file during sweeps
+        # we need to unflatten it (i.e. back into a nested dictionary)
+        # After unflatting, we ideally would remove the config items that are set by the sweep
+        # agent, but wandb.config does not allow easily removal (i.e. del doesn't work)
+
+        for config_key, config_val in wandb.config.items():
+            if not isinstance(config_val, dict):
+                primary_key, sub_key = config_key.split(".")
+                wandb.config[primary_key][sub_key] = config_val
+
+    # If config_fp is None we must be resuming a run. In this case, we can use the config 
+    # to determine the original config file path
     if config_fp is None:
-        # NOTE: if the config_file has not been set in the config file, then something's gone wrong
-        assert (
-            "config_file" in wandb.config["EXPERIMENT"]
-        ), "config_file not found in config"
-        config_fp = wandb.config["EXPERIMENT"]["config_file"]
-    else:
-        wandb.config["EXPERIMENT"]["config_file"] = config_fp
+        config_fp = wandb.config["EXPERIMENT"]["config_fp"]
 
     setup_logger(config_fp, run_id)
 
     # we are resuming training if resume_num_task_batches is greater than 0
 
     if resume_training:
-        logging.info(f"Resuming run with id: {run_id}")
+        logging.info(f"Resuming run with run id: {run_id} - wandb run id: {wandb_run_id}")
     else:
-        logging.info(f"Initializing run with id: {run_id}")
-
-    if offline_mode:
-        logging.info("Running in offline mode")
-        os.environ["WANDB_MODE"] = "offline"
+        logging.info(f"Initializing run with id: {run_id} - wandb run id: {wandb_run_id}")
 
     seed = int(wandb.config["EXPERIMENT"]["seed"])
     # shifting over the random seed by resume_num_task_batches steps in order for the meta

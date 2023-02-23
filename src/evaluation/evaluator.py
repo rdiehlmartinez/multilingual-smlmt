@@ -99,12 +99,12 @@ class Evaluator(object):
             for task in cross_lingual_tasks
         }
 
-        self.save_checkpoints = wandb.config["EXPERIMENT"]["save_checkpoints"]
+        self.save_best_checkpoints = wandb.config["EXPERIMENT"]["save_best_checkpoints"]
 
-        if self.save_checkpoints:
+        if self.save_best_checkpoints:
             # NOTE: checkpoints are saved by the pipeline when the evaluation is completed -
-            # however if we are saving checkpoints the evaluator needs to mark when a new
-            # best model is found so that the pipeline can save the model
+            # however if we are saving best so-far checkpoints, the evaluator needs to mark when
+            # a new best model is found so that the pipeline can save that model later
             self.best_eval_tracker = {}
 
         self.use_multiple_gpus = use_multiple_gpus
@@ -612,8 +612,8 @@ class Evaluator(object):
                 )
 
                 # If we are saving eval checkpoints, then do some book-keeping to keep track of
-                # the best model
-                if self.save_checkpoints:
+                # the best model so-far
+                if self.save_best_checkpoints:
                     eval_metrics = [
                         result["eval_metric"] for result in task_eval_results
                     ]

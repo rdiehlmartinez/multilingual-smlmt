@@ -36,7 +36,7 @@ class Pipeline(object):
     Orchestrates model loading, training and evaluation using a specific type of (meta-)learner.
     """
 
-    def __init__(self, resume_num_task_batches: int = 0) -> None:
+    def __init__(self, run_id: int, resume_num_task_batches: int = 0) -> None:
         """Initialize base model and meta learning method based on a config
 
         NOTE: The optional keyword argument (resume_num_task_batches) should never be manually set,
@@ -44,8 +44,11 @@ class Pipeline(object):
         error and thus spawns a new job to continue running the program.
 
         Args:
+            * run_id: id of the run (our internal id, not wandb's)
             * resume_num_task_batches (int): number of task batches to resume training from
         """
+
+        self.run_id = run_id
 
         self.mode = wandb.config["EXPERIMENT"]["mode"]
         if self.mode not in ["train", "inference"]:
@@ -53,8 +56,8 @@ class Pipeline(object):
                 f"Invalid pipeline run mode: {self.mode} - must be 'train' or 'inference'"
             )
 
-        # whether to log out information to w&b
-        self.save_checkpoints = wandb.config["EXPERIMENT"]["save_checkpoints"]
+        # whether to save intermediary checkpoints; either way, we always save the latest checkpoint
+        self.save_best_checkpoints = wandb.config["EXPERIMENT"]["save_best_checkpoints"]
 
         # Setting device
         self.base_device = BASE_DEVICE
@@ -307,7 +310,7 @@ class Pipeline(object):
 
         return meta_lr_scheduler
 
-    ### --- Saving and shutdown helpers --- ###
+    ### --- Saving and checkpointing helpers --- ###
 
     def save_checkpoint(self, checkpoint_file: str) -> None:
         """
@@ -329,38 +332,23 @@ class Pipeline(object):
         torch.save(checkpoint, os.path.join(wandb.run.dir, checkpoint_file))
         wandb.save(checkpoint_file, policy="now")
 
-    def shutdown_processes(self) -> None:
-        """Helper function for shutting down any spawned processes"""
-
-        self.meta_dataset.shutdown()
-
-    def timeout_handler(self, signum, frame) -> None:
-        """
-        Gracefully handles early termination signals. Catches termination signals sent from
-        slurm just before the program is about to terminate and saved out a model checkpoint, as
-        well as shutting down any spawned workers.
-
-        Args:
-            * signum (int): signal number
-            * frame (frame): stack frame
+    def _track_training_progress(self) -> None: 
+        """ 
+        Over the course of training, we want to track the progress of the model - we have no
+        guarantee that the model will finish training in the time allotted by the scheduler. We 
+        track the progress so far by keeping a runfile that contains the current task batch number
+        along with the run id that is stored in wandb. This allows us to resume training from the
+        correct task batch number.
         """
 
-        logger.info("Timeout (SIGINT) termination signal received")
-        logger.info("Attempting to save latest checkpoint of model")
+        if not os.path.exists("run_files"):
+            os.mkdir("run_files")
 
-        # Will try to save checkpoint to resume training from (even if self.checkpoints is False)
+        with open(f"run_files/{self.run_id}.runfile", "w+") as f:
+            f.write(str(self.num_task_batches) + '\n')
+            f.write(str(wandb.run.id))
+
         self.save_checkpoint("latest-checkpoint.pt")
-
-        # writing out the current task batch number to the run_file
-        if not os.path.exists("tmp"):
-            os.mkdir("tmp")
-        with open(f"tmp/{wandb.run.id}.runfile", "w+") as f:
-            f.write(str(max(self.num_task_batches - 1, 0)))
-
-        self.shutdown_processes()
-
-        # exit code 124 triggers re-run
-        exit(124)
 
     ### --- Meta training loop helper --- ###
 
@@ -407,6 +395,13 @@ class Pipeline(object):
 
             self.evaluator.run(self.learner)
 
+            # evaluator logs out avg_eval_metric and avg_eval_finetune_steps both of which 
+            # track num_task_batches as their step_metric, so we need to log the associated 
+            # num_task_batches here
+            wandb.log({
+                "num_task_batches": self.num_task_batches,
+            })
+
             logger.info("### PIPELINE FINISHED ###")
             return
 
@@ -431,10 +426,9 @@ class Pipeline(object):
             )
 
             # for inner layers we need to track lr per layer
-            num_layers = len(self.learner.inner_layers_lr)
-            for layer_idx in range(num_layers):
+            for layer in self.learner.inner_layers_lr:
                 wandb.define_metric(
-                    f"inner_layer_{layer_idx}_lr",
+                    f"inner_layer_{layer}_lr",
                     step_metric="num_task_batches",
                 )
 
@@ -451,11 +445,37 @@ class Pipeline(object):
             else:
                 self.evaluator.run(self.learner, num_task_batches=0)
 
-        ### Model training loop
+        if self.num_task_batches == 0: 
+            # logging out initial information before training starts 
 
-        for task_batch_idx, task_batch in enumerate(self.meta_dataloader):
+            if self.learner_method != "baseline":
+                wandb.log(
+                    {"classifier_lr": self.learner.classifier_lr.item()}
+                )
+
+                for (
+                    layer_num,
+                    layer,
+                ) in self.learner.inner_layers_lr.items():
+                    wandb.log(
+                        {f"inner_layer_{layer_num}_lr": layer.item()}
+                    )
+
+            wandb.log({
+                "num_task_batches": self.num_task_batches,
+            })
+
+
+        # if we are resuming training, we need to set the task_sample_idx_shift_factor
+        task_sample_idx_shift_factor = self.num_task_batches * self.num_tasks_per_iteration
+
+        ### --- Meta training loop --- ###
+
+        for _task_sample_idx, task_batch in enumerate(self.meta_dataloader):
+
+            task_sample_idx = _task_sample_idx + task_sample_idx_shift_factor
             logger.debug(
-                f"\t (Task idx {task_batch_idx}) Language: {task_batch[0]}"
+                f"\t (Task Sample Idx {task_sample_idx}) Language: {task_batch[0]}"
             )
 
             ## Basic training with just a single GPU
@@ -469,7 +489,7 @@ class Pipeline(object):
             )  # normalizing loss
             task_batch_loss += task_loss
 
-            if (task_batch_idx + 1) % self.num_tasks_per_iteration == 0:
+            if (_task_sample_idx + 1) % self.num_tasks_per_iteration == 0:
                 ##### NOTE: Just finished a batch of tasks -- taking a global (meta) update step
 
                 self.num_task_batches += 1
@@ -488,8 +508,7 @@ class Pipeline(object):
                 if self.learner_method != "baseline":
                     # wandb logging info for any meta-learner
                     wandb.log(
-                        {"classifier_lr": self.learner.classifier_lr.item()},
-                        commit=False,
+                        {"classifier_lr": self.learner.classifier_lr.item()}
                     )
 
                     for (
@@ -497,8 +516,7 @@ class Pipeline(object):
                         layer,
                     ) in self.learner.inner_layers_lr.items():
                         wandb.log(
-                            {f"inner_layer_{layer_num}_lr": layer.item()},
-                            commit=False,
+                            {f"inner_layer_{layer_num}_lr": layer.item()}
                         )
 
                 wandb.log(
@@ -526,8 +544,7 @@ class Pipeline(object):
                             num_task_batches=self.num_task_batches,
                         )
 
-                        if self.save_checkpoints:
-                            self.save_checkpoint("latest-checkpoint.pt")
+                        if self.save_best_checkpoints:
                             if new_best:
                                 self.save_checkpoint(
                                     f"checkpoint-{self.num_task_batches}.pt"
@@ -537,10 +554,9 @@ class Pipeline(object):
                     # NOTE: stop training if we've done max_task_batch_steps global update steps
                     break
 
+                self._track_training_progress()
+
         ### Model done training - final clean up before exiting
 
         logger.info("### PIPELINE FINISHED ###")
-        if self.save_checkpoints:
-            self.save_checkpoint("final.pt")
-
-        self.shutdown_processes()
+        self.save_checkpoint("final.pt")
