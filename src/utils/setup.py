@@ -105,21 +105,21 @@ def setup(
     setup_wandb(config_fp, wandb_run_id, resume_training)
 
     if sweep_agent:
-         # If this is being run by a sweep agent, setuping wandb in previous call will 
-         # assign the wandb run_id 
+        # If this is being run by a sweep agent, setuping wandb in previous call will
+        # assign the wandb run_id
         wandb_run_id = wandb.run.id
 
-        # NOTE: wandb flattens the config file during sweeps
-        # we need to unflatten it (i.e. back into a nested dictionary)
-        # After unflatting, we ideally would remove the config items that are set by the sweep
-        # agent, but wandb.config does not allow easily removal (i.e. del doesn't work)
+    # NOTE: wandb possibly flattens the config file (e.g during sweeps)
+    # To be safe, we need to unflatten it (i.e. back into a nested dictionary)
+    # After unflatting, we ideally would remove the config items that are set by the sweep
+    # agent, but wandb.config does not allow easily removal (i.e. del doesn't work)
 
-        for config_key, config_val in wandb.config.items():
-            if not isinstance(config_val, dict):
-                primary_key, sub_key = config_key.split(".")
-                wandb.config[primary_key][sub_key] = config_val
+    for config_key, config_val in wandb.config.items():
+        if not isinstance(config_val, dict):
+            primary_key, sub_key = config_key.split(".")
+            wandb.config[primary_key][sub_key] = config_val
 
-    # If config_fp is None we must be resuming a run. In this case, we can use the config 
+    # If config_fp is None we must be resuming a run. In this case, we can use the config
     # to determine the original config file path
     if config_fp is None:
         config_fp = wandb.config["EXPERIMENT"]["config_fp"]
@@ -129,9 +129,13 @@ def setup(
     # we are resuming training if resume_num_task_batches is greater than 0
 
     if resume_training:
-        logging.info(f"Resuming run with run id: {run_id} - wandb run id: {wandb_run_id}")
+        logging.info(
+            f"Resuming run with run id: {run_id} - wandb run id: {wandb_run_id}"
+        )
     else:
-        logging.info(f"Initializing run with id: {run_id} - wandb run id: {wandb_run_id}")
+        logging.info(
+            f"Initializing run with id: {run_id} - wandb run id: {wandb_run_id}"
+        )
 
     seed = int(wandb.config["EXPERIMENT"]["seed"])
     # shifting over the random seed by resume_num_task_batches steps in order for the meta
