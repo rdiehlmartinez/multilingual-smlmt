@@ -63,4 +63,5 @@ command:
   - ${program}
   - --path
   - experiments/maml/maml_default.yaml
+  - --sweep_agent
   - ${args}

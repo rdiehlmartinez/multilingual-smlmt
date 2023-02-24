@@ -57,4 +57,5 @@ command:
   - ${program}
   - --path
   - experiments/baseline/baseline_default.yaml
+  - --sweep_agent
   - ${args}
