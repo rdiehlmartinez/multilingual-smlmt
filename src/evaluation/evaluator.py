@@ -7,6 +7,7 @@ from multiprocessing import Manager, Pool
 import torch
 
 import wandb
+from wandb.errors import CommError
 
 from ..datasets import NLU_TASK_GENERATOR_MAP
 from ..utils import num_gpus
@@ -159,22 +160,54 @@ class Evaluator(object):
         self.eval_tables = {}
 
         for task in standard_tasks:
-            self.eval_tables[task + "_standard_overview"] = wandb.Table(
-                columns=standard_overview_columns
-            )
-            self.eval_tables[task + "_standard_finetune"] = wandb.Table(
-                columns=standard_finetune_columns
-            )
+            
+            # NOTE: For each task, we first try to access the table from the artifact that might have 
+            # been created by a previous run. If that fails, we create a new table.
+            try: 
+                self.eval_tables[task + "_standard_overview"] = wandb.run.use_artifact( 
+                    "problyglot/Multilingual-SMLMT/run-{RUN_NAME}-{task}_standard_overview_table:latest",
+                ).get(
+                    "{task}_standard_overview_table"
+                )
+            except CommError:
+                self.eval_tables[task + "_standard_overview"] = wandb.Table(
+                    columns=standard_overview_columns
+                )
+
+            try: 
+                self.eval_tables[task + "_standard_finetune"] = wandb.run.use_artifact( 
+                    "problyglot/Multilingual-SMLMT/run-{RUN_NAME}-{task}_standard_finetune_table:latest",
+                ).get(
+                    "{task}_standard_finetune_table"
+                )
+            except CommError:
+                self.eval_tables[task + "_standard_finetune"] = wandb.Table(
+                    columns=standard_finetune_columns
+                )
 
         for task in few_shot_tasks:
-            self.eval_tables[task + "_few_shot"] = wandb.Table(
-                columns=few_shot_columns
-            )
+            try:
+                self.eval_tables[task + "_few_shot"] = wandb.run.use_artifact( 
+                    "problyglot/Multilingual-SMLMT/run-{RUN_NAME}-{task}_few_shot_table:latest",
+                ).get(
+                    "{task}_few_shot_table"
+                )
+            except CommError:
+                self.eval_tables[task + "_few_shot"] = wandb.Table(
+                    columns=few_shot_columns
+                )
 
         for task in cross_lingual_tasks:
-            self.eval_tables[task + "_cross_lingual"] = wandb.Table(
-                columns=cross_lingual_columns
-            )
+            try: 
+                self.eval_tables[task + "_cross_lingual"] = wandb.run.use_artifact( 
+                    "problyglot/Multilingual-SMLMT/run-{RUN_NAME}-{task}_cross_lingual_table:latest",
+                ).get(
+                    "{task}_cross_lingual_table"
+                )
+            except CommError:
+                self.eval_tables[task + "_cross_lingual"] = wandb.Table(
+                    columns=cross_lingual_columns
+                )
 
     ### Entry point to running evaluation
 
@@ -645,7 +678,8 @@ class Evaluator(object):
             {
                 "avg_eval_metric": all_eval_metric_mean,
                 "avg_eval_finetune_steps": all_num_finetune_steps_mean,
-            }
+            },
+            commit=False,
         )
 
         ### If specified, possibly saving out checkpoint

@@ -450,7 +450,8 @@ class Pipeline(object):
 
             if self.learner_method != "baseline":
                 wandb.log(
-                    {"classifier_lr": self.learner.classifier_lr.item()}
+                    {"classifier_lr": self.learner.classifier_lr.item()},
+                    commit=False
                 )
 
                 for (
@@ -458,12 +459,16 @@ class Pipeline(object):
                     layer,
                 ) in self.learner.inner_layers_lr.items():
                     wandb.log(
-                        {f"inner_layer_{layer_num}_lr": layer.item()}
+                        {f"inner_layer_{layer_num}_lr": layer.item()},
+                        commit=False
                     )
 
-            wandb.log({
-                "num_task_batches": self.num_task_batches,
-            })
+            wandb.log(
+                {
+                    "num_task_batches": self.num_task_batches,
+                },
+                commit=True 
+            )
 
 
         # if we are resuming training, we need to set the task_sample_idx_shift_factor
@@ -490,8 +495,14 @@ class Pipeline(object):
             task_batch_loss += task_loss
 
             if (_task_sample_idx + 1) % self.num_tasks_per_iteration == 0:
-                ##### NOTE: Just finished a batch of tasks -- taking a global (meta) update step
+                ##### NOTE: Just finished a batch of tasks #####
 
+                logger.info(
+                    f"No. batches of tasks processed: {self.num_task_batches}"
+                )
+                logger.info(f"\t(Meta) training loss: {task_batch_loss}")
+
+                ### Taking a meta optimization step    
                 self.num_task_batches += 1
 
                 # single GPU: taking optimizer step
@@ -499,36 +510,7 @@ class Pipeline(object):
                     grad_norm_constant=self.num_tasks_per_iteration
                 )
 
-                ### Logging out training results
-                logger.info(
-                    f"No. batches of tasks processed: {self.num_task_batches}"
-                )
-                logger.info(f"\t(Meta) training loss: {task_batch_loss}")
-
-                if self.learner_method != "baseline":
-                    # wandb logging info for any meta-learner
-                    wandb.log(
-                        {"classifier_lr": self.learner.classifier_lr.item()}
-                    )
-
-                    for (
-                        layer_num,
-                        layer,
-                    ) in self.learner.inner_layers_lr.items():
-                        wandb.log(
-                            {f"inner_layer_{layer_num}_lr": layer.item()}
-                        )
-
-                wandb.log(
-                    {
-                        "train_loss": task_batch_loss,
-                        "num_task_batches": self.num_task_batches,
-                    },
-                )
-
-                task_batch_loss = 0
-
-                ### possibly run evaluation of the model
+                ### possibly runnig evaluation of the model
                 if (
                     self.eval_every_n_iteration
                     and self.num_task_batches % self.eval_every_n_iteration
@@ -550,11 +532,39 @@ class Pipeline(object):
                                     f"checkpoint-{self.num_task_batches}.pt"
                                 )
 
+                if self.learner_method != "baseline":
+                    # wandb logging info for any meta-learner
+                    wandb.log(
+                        {"classifier_lr": self.learner.classifier_lr.item()},
+                        commit=False
+                    )
+
+                    for (
+                        layer_num,
+                        layer,
+                    ) in self.learner.inner_layers_lr.items():
+                        wandb.log(
+                            {f"inner_layer_{layer_num}_lr": layer.item()},
+                            commit=False
+                        )
+
+                ### Logging out training information
+
+                wandb.log(
+                    {
+                        "train_loss": task_batch_loss,
+                        "num_task_batches": self.num_task_batches,
+                    },
+                    commit=True
+                )
+
                 if self.num_task_batches % self.max_task_batch_steps == 0:
                     # NOTE: stop training if we've done max_task_batch_steps global update steps
                     break
 
                 self._track_training_progress()
+                
+                task_batch_loss = 0
 
         ### Model done training - final clean up before exiting
 
