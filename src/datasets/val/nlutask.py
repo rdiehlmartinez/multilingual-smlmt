@@ -416,8 +416,8 @@ class NLUTaskGenerator(metaclass=abc.ABCMeta):
     ### Finetuning related properties ###
     @property
     def max_patience(self) -> int:
-        return 3
+        return 4
 
     @property
     def eval_every_n_steps(self) -> int:
-        return 30
+        return 50
