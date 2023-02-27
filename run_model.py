@@ -63,6 +63,8 @@ if __name__ == "__main__":
     else: 
         wandb_run_id = run_id
 
+    resume_training = False
+
     # Possibly reading in a runfile (only exists if we are resuming training)
     run_file_path = f"run_files/{run_id}.runfile"
     if os.path.exists(run_file_path):
@@ -72,11 +74,12 @@ if __name__ == "__main__":
             # the second line in the runfile is the wandb run id (might be different from 
             # the internal run id)
             wandb_run_id = f.readline().strip()
+        resume_training = True
     else:
         resume_num_task_batches = 0
 
     # Setting up logging, config read in and seed setting
-    setup(args.path, run_id, wandb_run_id, resume_num_task_batches, args.offline_mode, args.sweep_agent)
+    setup(args.path, run_id, wandb_run_id, resume_num_task_batches, resume_training, args.offline_mode, args.sweep_agent)
 
     # Initializing the modeling pipeline with configuration and options
     pipeline = Pipeline(run_id, resume_num_task_batches)

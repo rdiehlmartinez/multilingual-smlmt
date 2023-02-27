@@ -72,6 +72,7 @@ def setup(
     run_id: str,
     wandb_run_id: str,
     resume_num_task_batches: int,
+    resume_training: bool,
     offline_mode: bool,
     sweep_agent: bool,
 ) -> None:
@@ -87,10 +88,10 @@ def setup(
         * run_id: id of the run
         * wandb_run_id: id of the wandb run (possibly NONE)
         * resume_num_task_batches: number of task batches to resume training from
+        * resume_training: whether or not to resume training
         * offline_mode: whether or not to run in offline mode
         * sweep_agent: whether or not the program is being run by a sweep agent
     """
-    resume_training = resume_num_task_batches > 0
 
     # setting the start method to spawn to avoid issues with CUDA and WandB
     try:
