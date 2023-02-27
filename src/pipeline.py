@@ -381,6 +381,7 @@ class Pipeline(object):
         """
 
         self._log_parameters()
+        self._track_training_progress()
 
         ### --------- Inference Mode (no model training) ----------
 
