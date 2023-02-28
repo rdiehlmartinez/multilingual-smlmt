@@ -14,7 +14,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -37,7 +36,6 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Other logging stuff
-wandb/
 
 # Unit test / coverage reports
 htmlcov/
@@ -167,6 +165,14 @@ machine.file.*
 tmp/
 logs/
 
-# Don't include the misc 
+# Don't include the misc and run time files 
 misc/
 run_files/
+artifacts/
+
+# Don't include wandb at root
+wandb/
+lib/higher
+lib/processors/lareqa.py
+lib/processors/pawsx.py
+lib/processors/sb_sed.py 
