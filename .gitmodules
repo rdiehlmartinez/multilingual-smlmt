@@ -1,0 +1,6 @@
+[submodule "lib/submodules/higher"]
+	path = lib/submodules/higher
+	url = git@github.com:rdiehlmartinez/higher.git
+[submodule "lib/submodules/wandb"]
+	path = lib/submodules/wandb
+	url = git@github.com:rdiehlmartinez/wandb.git
