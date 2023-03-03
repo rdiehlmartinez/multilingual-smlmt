@@ -84,6 +84,10 @@ if __name__ == "__main__":
     # Initializing the modeling pipeline with configuration and options
     pipeline = Pipeline(run_id, resume_num_task_batches)
 
+    # setting up timeout handler - called if the program receives a SIGINT either from the user
+    # or from SLURM if it is about to timeout
+    signal.signal(signal.SIGINT, pipeline.timeout_handler)
+
     # launching training or eval script
     pipeline()
 

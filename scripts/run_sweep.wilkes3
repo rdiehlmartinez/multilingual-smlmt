@@ -12,7 +12,7 @@
 #! Name of the job:
 #SBATCH -J multilingual-smlmt
 #! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
-#SBATCH -A BUTTERY-SL2-GPU
+#SBATCH -A BUTTERY-SL3-GPU
 #! How many whole nodes should be allocated?
 #SBATCH --nodes=1
 #! How many (MPI) tasks will there be in total?
@@ -90,7 +90,7 @@ then
   echo "Generating new run with ID: $JOBID"
   sweepid=$1
   export RUN_ID=$JOBID
-  timeout -s SIGINT --kill-after=10m 11h wandb agent --count 1 $sweepid 
+  timeout -s SIGINT --kill-after=50m 11h wandb agent --count 1 $sweepid 
 elif [[ $# -eq 2 ]]
 then
   # NOTE: we don't actually use the sweepid here, we pass it in to indicate that we 
@@ -98,7 +98,7 @@ then
   echo "Resuming sweep agent with ID: $1; run ID: $2"
   sweepid=$1
   RUN_ID=$2
-  timeout -s SIGINT --kill-after=10m 11h python run_model.py --run_id $2
+  timeout -s SIGINT --kill-after=50m 11h python run_model.py --run_id $2
 else
   echo "Invalid number of arguments (should either be 1 or 2)"
   exit 1

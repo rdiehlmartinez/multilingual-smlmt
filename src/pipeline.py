@@ -57,7 +57,9 @@ class Pipeline(object):
             )
 
         # whether to save intermediary checkpoints; either way, we always save the latest checkpoint
-        self.save_best_checkpoints = wandb.config["EXPERIMENT"]["save_best_checkpoints"]
+        self.save_best_checkpoints = wandb.config["EXPERIMENT"][
+            "save_best_checkpoints"
+        ]
 
         # Setting device
         self.base_device = BASE_DEVICE
@@ -130,6 +132,23 @@ class Pipeline(object):
                 use_multiple_gpus=self.use_multiple_gpus
             )
 
+    ### -- Timeout handler hook for slurm -- ###
+    def timeout_handler(self, signum, frame) -> None:
+        """
+        Gracefully handles early termination signals. Catches termination signals sent from
+        slurm just before the program is about to terminate and saved out a model checkpoint, as
+        well as shutting down any spawned workers (if applicable).
+        Args:
+            * signum (int): signal number
+            * frame (frame): stack frame
+        """
+
+        logger.info("Timeout (SIGINT) termination signal received")
+        logger.info("Attempting to save latest checkpoint of model")
+
+        # exit code 124 triggers re-run
+        exit(124)
+
     ### -- Initialization helper functions -- ###
 
     def _log_parameters(self):
@@ -175,7 +194,16 @@ class Pipeline(object):
             wandb_checkpoint = wandb.restore(
                 checkpoint_file, run_path=checkpoint_run
             )
-            checkpoint = torch.load(wandb_checkpoint.name)
+            try:
+                checkpoint = torch.load(wandb_checkpoint.name)
+            except RuntimeError as e:
+                logger.debug(
+                    "Error loading in checkpoint file with torch.load"
+                )
+                logger.debug(f"RunetimeError message: {e}")
+                logger.debug("Exiting with 124 to possibly re-run job")
+                exit(124)
+
             os.rename(
                 os.path.join(wandb.run.dir, checkpoint_file),
                 os.path.join(wandb.run.dir, "loaded_checkpoint.pt"),
@@ -332,10 +360,10 @@ class Pipeline(object):
         torch.save(checkpoint, os.path.join(wandb.run.dir, checkpoint_file))
         wandb.save(checkpoint_file, policy="now")
 
-    def _track_training_progress(self) -> None: 
-        """ 
+    def _track_training_progress(self) -> None:
+        """
         Over the course of training, we want to track the progress of the model - we have no
-        guarantee that the model will finish training in the time allotted by the scheduler. We 
+        guarantee that the model will finish training in the time allotted by the scheduler. We
         track the progress so far by keeping a runfile that contains the current task batch number
         along with the run id that is stored in wandb. This allows us to resume training from the
         correct task batch number.
@@ -345,7 +373,7 @@ class Pipeline(object):
             os.mkdir("run_files")
 
         with open(f"run_files/{self.run_id}.runfile", "w+") as f:
-            f.write(str(self.num_task_batches) + '\n')
+            f.write(str(self.num_task_batches) + "\n")
             f.write(str(wandb.run.id))
 
         self.save_checkpoint("latest-checkpoint.pt")
@@ -396,12 +424,14 @@ class Pipeline(object):
 
             self.evaluator.run(self.learner)
 
-            # evaluator logs out avg_eval_metric and avg_eval_finetune_steps both of which 
-            # track num_task_batches as their step_metric, so we need to log the associated 
+            # evaluator logs out avg_eval_metric and avg_eval_finetune_steps both of which
+            # track num_task_batches as their step_metric, so we need to log the associated
             # num_task_batches here
-            wandb.log({
-                "num_task_batches": self.num_task_batches,
-            })
+            wandb.log(
+                {
+                    "num_task_batches": self.num_task_batches,
+                }
+            )
 
             logger.info("### PIPELINE FINISHED ###")
             return
@@ -446,13 +476,13 @@ class Pipeline(object):
             else:
                 self.evaluator.run(self.learner, num_task_batches=0)
 
-        if self.num_task_batches == 0: 
-            # logging out initial information before training starts 
+        if self.num_task_batches == 0:
+            # logging out initial information before training starts
 
             if self.learner_method != "baseline":
                 wandb.log(
                     {"classifier_lr": self.learner.classifier_lr.item()},
-                    commit=False
+                    commit=False,
                 )
 
                 for (
@@ -461,24 +491,24 @@ class Pipeline(object):
                 ) in self.learner.inner_layers_lr.items():
                     wandb.log(
                         {f"inner_layer_{layer_num}_lr": layer.item()},
-                        commit=False
+                        commit=False,
                     )
 
             wandb.log(
                 {
                     "num_task_batches": self.num_task_batches,
                 },
-                commit=True 
+                commit=True,
             )
 
-
         # if we are resuming training, we need to set the task_sample_idx_shift_factor
-        task_sample_idx_shift_factor = self.num_task_batches * self.num_tasks_per_iteration
+        task_sample_idx_shift_factor = (
+            self.num_task_batches * self.num_tasks_per_iteration
+        )
 
         ### --- Meta training loop --- ###
 
         for _task_sample_idx, task_batch in enumerate(self.meta_dataloader):
-
             task_sample_idx = _task_sample_idx + task_sample_idx_shift_factor
             logger.debug(
                 f"\t (Task Sample Idx {task_sample_idx}) Language: {task_batch[0]}"
@@ -503,7 +533,7 @@ class Pipeline(object):
                 )
                 logger.info(f"\t(Meta) training loss: {task_batch_loss}")
 
-                ### Taking a meta optimization step    
+                ### Taking a meta optimization step
                 self.num_task_batches += 1
 
                 # single GPU: taking optimizer step
@@ -537,7 +567,7 @@ class Pipeline(object):
                     # wandb logging info for any meta-learner
                     wandb.log(
                         {"classifier_lr": self.learner.classifier_lr.item()},
-                        commit=False
+                        commit=False,
                     )
 
                     for (
@@ -546,7 +576,7 @@ class Pipeline(object):
                     ) in self.learner.inner_layers_lr.items():
                         wandb.log(
                             {f"inner_layer_{layer_num}_lr": layer.item()},
-                            commit=False
+                            commit=False,
                         )
 
                 ### Logging out training information
@@ -556,7 +586,7 @@ class Pipeline(object):
                         "train_loss": task_batch_loss,
                         "num_task_batches": self.num_task_batches,
                     },
-                    commit=True
+                    commit=True,
                 )
 
                 if self.num_task_batches % self.max_task_batch_steps == 0:
@@ -564,7 +594,7 @@ class Pipeline(object):
                     break
 
                 self._track_training_progress()
-                
+
                 task_batch_loss = 0
 
         ### Model done training - final clean up before exiting
