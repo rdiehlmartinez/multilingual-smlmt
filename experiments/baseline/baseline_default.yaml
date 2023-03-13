@@ -12,7 +12,7 @@ META_DATASET:
     task_sampling_prop_rate: 0.3
 LANGUAGE_TASK:
   value:
-    use_smlmt_labels: True
+    use_smlmt_labels: False
     n: 4
     k: 10
     q: 10
@@ -39,7 +39,7 @@ PIPELINE:
     num_tasks_per_iteration: 4
     eval_every_n_iteration: 100
     max_task_batch_steps: 2000
-    run_initial_eval: True
+    run_initial_eval: False
 EVALUATION:
   value:
     standard_tasks: mlqa,xnli
